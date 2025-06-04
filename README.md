@@ -162,7 +162,3 @@ npm test
 ## License
 
 MIT License
-
-## Security
-
-For security concerns, please email security@gradientorderbook.com
