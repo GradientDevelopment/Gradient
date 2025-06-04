@@ -1,7 +1,12 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("@nomicfoundation/hardhat-verify");
+require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
+const privateKey = process.env.MAIN_PRIVATE_KEY ?? "";
+const privateKeyTest = process.env.PRIVATE_KEY_2 ?? "";
 module.exports = {
+  defaultNetwork: "hardhat",
   solidity: {
     version: "0.8.26",
     settings: {
@@ -15,6 +20,26 @@ module.exports = {
     hardhat: {
       chainId: 31337
     },
-    // Add other network configurations as needed
-  }
+    mainnet: {
+      url: `https://eth-mainnet.g.alchemy.com/v2/${process.env.MAIN_ALCHEMY_KEY}`,
+      accounts: [privateKey],
+      allowUnlimitedContractSize: true,
+    },
+    bsctest: {
+      url: "https://data-seed-prebsc-1-s1.binance.org:8545/",
+      accounts: [privateKeyTest],
+      allowUnlimitedContractSize: true,
+    },
+    base: {
+      url: `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY}`,
+      accounts: [privateKeyTest],
+      allowUnlimitedContractSize: true,
+    },
+  },
+  etherscan: {
+    apiKey: {
+      mainnet: process.env.ETHERSCAN_API_KEY,
+      bscTestnet: process.env.BSCSCAN_API_KEY
+    }
+  },
 };

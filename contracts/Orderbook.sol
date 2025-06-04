@@ -5,11 +5,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title Orderbook
+/// @title GradientOrderbook
 /// @notice A decentralized orderbook for trading ERC20 tokens against ETH
 /// @dev Implements a limit order system with order matching and fulfillment
-/// @custom:security-contact security@gradientorderbook.com
-contract Orderbook is Ownable, ReentrancyGuard {
+contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Types of orders that can be placed
     enum OrderType {
         Buy,
