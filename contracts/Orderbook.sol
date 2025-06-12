@@ -385,17 +385,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 uint256 buyerFee = (totalCost * feePercentage) / DIVISOR;
                 uint256 refundAmount = totalCost + buyerFee;
 
-                // Decrement totalFeesCollected if possible
-                if (totalFeesCollected >= buyerFee) {
-                    totalFeesCollected -= buyerFee;
+                uint256 actualFeeRefund = buyerFee > totalFeesCollected
+                    ? totalFeesCollected
+                    : buyerFee;
+                totalFeesCollected -= actualFeeRefund;
+
+                // Adjust totalRefund if we couldn't refund full fee
+                if (actualFeeRefund < buyerFee) {
+                    refundAmount = totalCost + actualFeeRefund;
                 }
 
-                // Ensure contract has enough balance
                 require(
                     address(this).balance >= refundAmount,
                     "Insufficient ETH in contract"
                 );
-
                 // Refund the ETH
                 (bool success, ) = payable(order.owner).call{
                     value: refundAmount
