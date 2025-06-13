@@ -11,10 +11,17 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 /// @dev Implements a limit order system with order matching and fulfillment
 contract GradientOrderbook is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+
     /// @notice Types of orders that can be placed
     enum OrderType {
         Buy,
         Sell
+    }
+
+    /// @notice Types of order execution
+    enum OrderExecutionType {
+        Limit,
+        Market
     }
 
     /// @notice Possible states of an order
@@ -31,9 +38,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 orderId; // Unique identifier for the order
         address owner; // Address that created the order
         OrderType orderType; // Whether this is a buy or sell order
+        OrderExecutionType executionType; // Whether this is a limit or market order
         address token; // Token being traded
         uint256 amount; // Total amount of tokens to trade
-        uint256 price; // Price per token in ETH (18 decimals)
+        uint256 price; // For limit orders: exact price, For market orders: max price (buy) or min price (sell)
         uint256 filledAmount; // Amount of tokens that have been filled
         uint256 expirationTime; // Timestamp when the order expires
         OrderStatus status; // Current status of the order
@@ -69,9 +77,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Mapping from order ID to Order struct
     mapping(uint256 => Order) public orders;
 
-    /// @notice Mapping from token pair + order type hash to array of order IDs
-    /// @dev Key is keccak256(abi.encodePacked(token, orderType))
-    mapping(bytes32 => uint256[]) private orderQueues;
+    /// @notice Mapping from token pair + order type + execution type hash to array of order IDs
+    /// @dev Key is keccak256(abi.encodePacked(token, orderType, executionType))
+    // mapping(bytes32 => uint256[]) private orderQueues;
+    mapping(bytes32 => uint256) private totalOrderCount;
+    mapping(bytes32 => mapping(uint256 => uint256)) private orderQueues;
+
+    /// @notice Mapping from order ID to its position in the queue
+    /// @dev Used for efficient removal of orders from queues
+    mapping(uint256 => uint256) private orderQueuePositions;
 
     /// @notice Mapping of addresses allowed to fulfill orders
     mapping(address => bool) public whitelistedFulfillers;
@@ -87,10 +101,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 indexed orderId,
         address indexed owner,
         OrderType orderType,
+        OrderExecutionType executionType,
         address token,
         uint256 amount,
         uint256 price,
-        uint256 expirationTime
+        uint256 expirationTime,
+        uint256 totalCost // Add total cost for better tracking
     );
 
     /// @notice Emitted when an order is cancelled by its owner
@@ -184,15 +200,17 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         emit FeesWithdrawn(recipient, amount);
     }
 
-    /// @notice Generates a unique key for order queues based on token and order type
+    /// @notice Generates a unique key for order queues based on token, order type, and execution type
     /// @param token The token address
     /// @param orderType The type of order (Buy/Sell)
+    /// @param executionType The type of execution (Limit/Market)
     /// @return bytes32 A unique key for the order queue
     function _getQueueKey(
         address token,
-        OrderType orderType
+        OrderType orderType,
+        OrderExecutionType executionType
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(token, orderType));
+        return keccak256(abi.encodePacked(token, orderType, executionType));
     }
 
     /// @notice Sets or removes a fulfiller's whitelisted status
@@ -223,15 +241,17 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Creates a new order in the orderbook
     /// @param orderType Type of order (Buy/Sell)
+    /// @param executionType Type of execution (Limit/Market)
     /// @param token Address of the token to trade
     /// @param amount Amount of tokens to trade
-    /// @param price Price per token in ETH (18 decimals)
+    /// @param price For limit orders: exact price, For market orders: max price (buy) or min price (sell)
     /// @param ttl Time-to-live in seconds for the order
     /// @dev For buy orders, requires ETH to be sent with the transaction
     /// @dev For sell orders, requires token approval
     /// @return uint256 ID of the created order
     function createOrder(
         OrderType orderType,
+        OrderExecutionType executionType,
         address token,
         uint256 amount,
         uint256 price,
@@ -246,6 +266,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 buyerFee = (totalCost * feePercentage) / DIVISOR;
         require(totalCost >= minOrderSize, "Order too small");
         require(totalCost <= maxOrderSize, "Order too large");
+
         // For buy orders, require ETH payment including potential fee
         if (orderType == OrderType.Buy) {
             require(msg.value >= totalCost + buyerFee, "Insufficient ETH sent");
@@ -263,6 +284,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             orderId: orderId,
             owner: msg.sender,
             orderType: orderType,
+            executionType: executionType,
             token: token,
             amount: amount,
             price: price,
@@ -273,18 +295,19 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         orders[orderId] = newOrder;
 
-        // Add to the appropriate queue
-        bytes32 queueKey = _getQueueKey(token, orderType);
-        orderQueues[queueKey].push(orderId);
+        // Add to the appropriate queue based on execution type
+        _addOrderToQueue(orderId, token, orderType, executionType);
 
         emit OrderCreated(
             orderId,
             msg.sender,
             orderType,
+            executionType,
             token,
             amount,
             price,
-            newOrder.expirationTime
+            newOrder.expirationTime,
+            totalCost
         );
 
         // Return excess ETH for buy orders
@@ -309,7 +332,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(!isOrderExpired(orderId), "Order expired");
 
         order.status = OrderStatus.Cancelled;
-
         // If it was a buy order, return the ETH including potential fee
         if (order.orderType == OrderType.Buy) {
             uint256 remainingAmount = order.amount - order.filledAmount;
@@ -410,58 +432,97 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         emit OrderExpired(orderId);
     }
 
-    /// @notice Retrieves all active orders for a given token and order type
-    /// @param token Address of the input token
+    /// @notice Retrieves all active orders for a given token, order type, and execution type
+    /// @param token Address of the token
     /// @param orderType Type of orders to retrieve (Buy/Sell)
+    /// @param executionType Type of execution (Limit/Market)
     /// @return uint256[] Array of order IDs that are active and not expired
     function getActiveOrders(
         address token,
-        OrderType orderType
+        OrderType orderType,
+        OrderExecutionType executionType
     ) external view returns (uint256[] memory) {
-        bytes32 queueKey = _getQueueKey(token, orderType);
-        uint256[] storage queueOrders = orderQueues[queueKey];
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
 
+        uint256[] memory activeOrders;
         // Count active orders
         uint256 activeCount = 0;
-        for (uint256 i = 0; i < queueOrders.length; i++) {
+        for (uint256 i = 0; i < totalOrderCount[queueKey]; i++) {
+            uint256 orderId = orderQueues[queueKey][i];
             if (
-                orders[queueOrders[i]].status == OrderStatus.Active &&
-                !isOrderExpired(queueOrders[i])
+                orders[orderId].status == OrderStatus.Active &&
+                !isOrderExpired(orderId)
             ) {
+                activeOrders[activeCount] = orderId;
                 activeCount++;
             }
         }
-
-        // Create array of active orders
-        uint256[] memory activeOrders = new uint256[](activeCount);
-        uint256 currentIndex = 0;
-        for (
-            uint256 i = 0;
-            i < queueOrders.length && currentIndex < activeCount;
-            i++
-        ) {
-            if (
-                orders[queueOrders[i]].status == OrderStatus.Active &&
-                !isOrderExpired(queueOrders[i])
-            ) {
-                activeOrders[currentIndex] = queueOrders[i];
-                currentIndex++;
-            }
-        }
-
         return activeOrders;
     }
 
-    /// @notice Fulfills multiple matched orders
+    function getActiveOrdersPaged(
+        address token,
+        OrderType orderType,
+        OrderExecutionType executionType,
+        uint256 startIndex,
+        uint256 count
+    ) external view returns (uint256[] memory) {
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+        uint256 total = totalOrderCount[queueKey];
+        uint256[] memory temp = new uint256[](count);
+        uint256 found = 0;
+
+        for (uint256 i = startIndex; i < total && found < count; i++) {
+            uint256 orderId = orderQueues[queueKey][i];
+            if (
+                orders[orderId].status == OrderStatus.Active &&
+                !isOrderExpired(orderId)
+            ) {
+                temp[found] = orderId;
+                found++;
+            }
+        }
+
+        // Resize array to `found`
+        uint256[] memory result = new uint256[](found);
+        for (uint256 i = 0; i < found; i++) {
+            result[i] = temp[i];
+        }
+
+        return result;
+    }
+
+    /// @notice Fulfills multiple matched limit orders
     /// @param matches Array of OrderMatch structs containing match details
     /// @dev Only whitelisted fulfillers can call this function
-    function fulfillMatchedOrders(
+    /// @dev All orders in matches must be limit orders
+    function fulfillLimitOrders(
         OrderMatch[] calldata matches
     ) external nonReentrant onlyWhitelistedFulfiller {
         require(matches.length > 0, "No order matches to fulfill");
 
         for (uint256 i = 0; i < matches.length; i++) {
-            _fulfillMatchedOrders(matches[i]);
+            _fulfillLimitOrders(matches[i]);
+        }
+    }
+
+    /// @notice Fulfills multiple matched market orders
+    /// @param matches Array of OrderMatch structs containing match details
+    /// @param executionPrices Array of execution prices for each match
+    /// @dev Only whitelisted fulfillers can call this function
+    /// @dev All orders in matches must be market orders
+    function fulfillMarketOrders(
+        OrderMatch[] calldata matches,
+        uint256[] calldata executionPrices
+    ) external nonReentrant onlyWhitelistedFulfiller {
+        require(matches.length > 0, "No order matches to fulfill");
+        require(
+            matches.length == executionPrices.length,
+            "Mismatched arrays length"
+        );
+
+        for (uint256 i = 0; i < matches.length; i++) {
+            _fulfillMarketOrders(matches[i], executionPrices[i]);
         }
     }
 
@@ -474,10 +535,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         return feeAmount;
     }
 
-    /// @notice Internal function to fulfill a matched pair of orders
+    /// @notice Internal function to fulfill a matched pair of limit orders
     /// @param _match OrderMatch struct containing the match details
     /// @dev Handles the transfer of ETH and tokens between parties
-    function _fulfillMatchedOrders(OrderMatch memory _match) internal {
+    /// @dev Allows partial fills of either order
+    function _fulfillLimitOrders(OrderMatch memory _match) internal {
         Order storage buyOrder = orders[_match.buyOrderId];
         Order storage sellOrder = orders[_match.sellOrderId];
 
@@ -498,21 +560,34 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Invalid order types"
         );
         require(buyOrder.token == sellOrder.token, "Token mismatch");
-        require(buyOrder.price >= sellOrder.price, "Price mismatch");
-
-        // Validate fill amount
-        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
-        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
-        require(_match.fillAmount > 0, "Invalid fill amount");
         require(
-            _match.fillAmount <= buyRemaining &&
-                _match.fillAmount <= sellRemaining,
-            "Fill amount exceeds available"
+            buyOrder.executionType == OrderExecutionType.Limit &&
+                sellOrder.executionType == OrderExecutionType.Limit,
+            "Not limit orders"
+        );
+        require(
+            buyOrder.price >= sellOrder.price,
+            "Price mismatch for limit orders"
         );
 
+        // Calculate actual fill amount based on remaining amounts
+        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
+        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
+        uint256 actualFillAmount = _match.fillAmount;
+
+        // Adjust fill amount if it exceeds either order's remaining amount
+        if (actualFillAmount > buyRemaining) {
+            actualFillAmount = buyRemaining;
+        }
+        if (actualFillAmount > sellRemaining) {
+            actualFillAmount = sellRemaining;
+        }
+
+        require(actualFillAmount > 0, "No amount to fill");
+
         // Calculate token amounts and fees
-        uint256 tokenAmount = _match.fillAmount;
-        uint256 paymentAmount = (_match.fillAmount * sellOrder.price) / 1e18; // Using sell order price
+        uint256 tokenAmount = actualFillAmount;
+        uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18; // Use sell price for limit orders
 
         // Calculate and collect fees from seller party
         uint256 sellerFee = _collectFee(paymentAmount);
@@ -529,36 +604,166 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
 
         // Update order states
-        buyOrder.filledAmount += _match.fillAmount;
-        sellOrder.filledAmount += _match.fillAmount;
+        buyOrder.filledAmount += actualFillAmount;
+        sellOrder.filledAmount += actualFillAmount;
 
         // Return excess ETH to buyer if using a lower sell price
         if (buyOrder.price > sellOrder.price) {
-            uint256 savedAmount = (_match.fillAmount *
+            uint256 savedAmount = (actualFillAmount *
                 (buyOrder.price - sellOrder.price)) / 1e18;
             (success, ) = buyOrder.owner.call{value: savedAmount}("");
             require(success, "ETH savings return failed");
         }
 
-        // Update order statuses
+        // Update order statuses and remove from queues if fully filled
         if (buyOrder.filledAmount == buyOrder.amount) {
             buyOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.buyOrderId, _match.fillAmount);
+            bytes32 buyQueueKey = _getQueueKey(
+                buyOrder.token,
+                buyOrder.orderType,
+                buyOrder.executionType
+            );
+            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
                 _match.buyOrderId,
-                _match.fillAmount,
+                actualFillAmount,
                 buyOrder.amount - buyOrder.filledAmount
             );
         }
 
         if (sellOrder.filledAmount == sellOrder.amount) {
             sellOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.sellOrderId, _match.fillAmount);
+            bytes32 sellQueueKey = _getQueueKey(
+                sellOrder.token,
+                sellOrder.orderType,
+                sellOrder.executionType
+            );
+            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
                 _match.sellOrderId,
-                _match.fillAmount,
+                actualFillAmount,
+                sellOrder.amount - sellOrder.filledAmount
+            );
+        }
+    }
+
+    /// @notice Internal function to fulfill a matched pair of market orders
+    /// @param _match OrderMatch struct containing the match details
+    /// @param executionPrice The price at which the orders will be executed
+    /// @dev Handles the transfer of ETH and tokens between parties
+    /// @dev Allows partial fills of either order
+    function _fulfillMarketOrders(
+        OrderMatch memory _match,
+        uint256 executionPrice
+    ) internal {
+        Order storage buyOrder = orders[_match.buyOrderId];
+        Order storage sellOrder = orders[_match.sellOrderId];
+
+        // Validate orders
+        require(
+            buyOrder.status == OrderStatus.Active &&
+                sellOrder.status == OrderStatus.Active,
+            "Orders must be active"
+        );
+        require(
+            !isOrderExpired(_match.buyOrderId) &&
+                !isOrderExpired(_match.sellOrderId),
+            "Orders expired"
+        );
+        require(
+            buyOrder.orderType == OrderType.Buy &&
+                sellOrder.orderType == OrderType.Sell,
+            "Invalid order types"
+        );
+        require(buyOrder.token == sellOrder.token, "Token mismatch");
+        require(
+            (buyOrder.executionType == OrderExecutionType.Market ||
+                sellOrder.executionType == OrderExecutionType.Market),
+            "Not market orders"
+        );
+
+        // Validate execution price
+        if (buyOrder.executionType == OrderExecutionType.Market) {
+            require(
+                executionPrice <= buyOrder.price,
+                "Execution price exceeds buyer's max price"
+            );
+        }
+        if (sellOrder.executionType == OrderExecutionType.Market) {
+            require(
+                executionPrice >= sellOrder.price,
+                "Execution price below seller's min price"
+            );
+        }
+
+        // Calculate actual fill amount based on remaining amounts
+        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
+        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
+        uint256 actualFillAmount = _match.fillAmount;
+
+        // Adjust fill amount if it exceeds either order's remaining amount
+        if (actualFillAmount > buyRemaining) {
+            actualFillAmount = buyRemaining;
+        }
+        if (actualFillAmount > sellRemaining) {
+            actualFillAmount = sellRemaining;
+        }
+
+        require(actualFillAmount > 0, "No amount to fill");
+
+        // Calculate token amounts and fees
+        uint256 tokenAmount = actualFillAmount;
+        uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
+
+        // Calculate and collect fees from seller party
+        uint256 sellerFee = _collectFee(paymentAmount);
+
+        // Calculate final amounts after fees
+        uint256 sellerPayment = paymentAmount - sellerFee;
+
+        // Execute transfers
+        // 1. Transfer ETH from contract to seller (minus fee)
+        (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
+        require(success, "ETH transfer to seller failed");
+
+        // 2. Transfer traded tokens from contract to buyer
+        IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
+
+        // Update order states
+        buyOrder.filledAmount += actualFillAmount;
+        sellOrder.filledAmount += actualFillAmount;
+
+        // Update order statuses and remove from queues if fully filled
+        if (buyOrder.filledAmount == buyOrder.amount) {
+            buyOrder.status = OrderStatus.Filled;
+            bytes32 buyQueueKey = _getQueueKey(
+                buyOrder.token,
+                buyOrder.orderType,
+                buyOrder.executionType
+            );
+            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.buyOrderId,
+                actualFillAmount,
+                buyOrder.amount - buyOrder.filledAmount
+            );
+        }
+
+        if (sellOrder.filledAmount == sellOrder.amount) {
+            sellOrder.status = OrderStatus.Filled;
+            bytes32 sellQueueKey = _getQueueKey(
+                sellOrder.token,
+                sellOrder.orderType,
+                sellOrder.executionType
+            );
+            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.sellOrderId,
+                actualFillAmount,
                 sellOrder.amount - sellOrder.filledAmount
             );
         }
@@ -590,4 +795,71 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Fallback function that accepts ETH
     /// @dev Required for receiving ETH payments through alternative methods
     fallback() external payable {}
+
+    // /// @notice Removes an order from its queue
+    // /// @param orderId The ID of the order to remove
+    // /// @param queueKey The queue key where the order is stored
+    // /// @dev Uses swap and pop pattern for efficient removal
+    // function _removeOrderFromQueue(uint256 orderId, bytes32 queueKey) internal {
+    //     uint256 position = orderQueuePositions[orderId];
+
+    //     // If order is not in queue, do nothing
+    //     if (
+    //         position >= totalOrderCount[queueKey] ||
+    //         orderQueues[queueKey][position] != orderId
+    //     ) {
+    //         return;
+    //     }
+
+    //     // If order is not the last one, swap with last and update position
+    //     if (position != totalOrderCount[queueKey] - 1) {
+    //         uint256 lastOrderId = orderQueues[queueKey][
+    //             totalOrderCount[queueKey] - 1
+    //         ];
+    //         orderQueues[queueKey][position] = lastOrderId;
+    //         orderQueuePositions[lastOrderId] = position;
+    //     }
+
+    //     // Remove the last element
+    //     queue.pop();
+    //     delete orderQueuePositions[orderId];
+    // }
+
+    /// @notice Adds an order to its appropriate queue
+    /// @param orderId The ID of the order to add
+    /// @param token The token address
+    /// @param orderType The type of order (Buy/Sell)
+    /// @param executionType The type of execution (Limit/Market)
+    function _addOrderToQueue(
+        uint256 orderId,
+        address token,
+        OrderType orderType,
+        OrderExecutionType executionType
+    ) internal {
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+
+        // Store the position of the order in the queue
+        orderQueuePositions[orderId] = totalOrderCount[queueKey];
+        orderQueues[queueKey][totalOrderCount[queueKey]] = orderId;
+        totalOrderCount[queueKey]++;
+    }
+
+    /// @notice Emergency function to withdraw stuck tokens
+    function emergencyWithdraw(
+        address token,
+        address to,
+        uint256 amount
+    ) external onlyOwner {
+        require(to != address(0), "Invalid recipient");
+        if (token == address(0)) {
+            require(
+                amount <= address(this).balance,
+                "Insufficient ETH balance"
+            );
+            (bool success, ) = to.call{value: amount}("");
+            require(success, "ETH transfer failed");
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
+    }
 }
