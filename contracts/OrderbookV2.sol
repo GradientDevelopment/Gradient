@@ -80,7 +80,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Mapping from token pair + order type + execution type hash to array of order IDs
     /// @dev Key is keccak256(abi.encodePacked(token, orderType, executionType))
     // mapping(bytes32 => uint256[]) private orderQueues;
-    mapping(bytes32 => uint256) private totalOrderCount;
+    mapping(bytes32 => uint256) public totalOrderCount;
     mapping(bytes32 => mapping(uint256 => uint256)) private orderQueues;
 
     /// @notice Mapping from order ID to its position in the queue
@@ -432,6 +432,23 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         emit OrderExpired(orderId);
     }
 
+    function getActiveOrdersCount(
+        bytes32 queueKey
+    ) public view returns (uint256) {
+        // Count active orders
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < totalOrderCount[queueKey]; i++) {
+            uint256 orderId = orderQueues[queueKey][i];
+            if (
+                orders[orderId].status == OrderStatus.Active &&
+                !isOrderExpired(orderId)
+            ) {
+                activeCount++;
+            }
+        }
+        return activeCount;
+    }
+
     /// @notice Retrieves all active orders for a given token, order type, and execution type
     /// @param token Address of the token
     /// @param orderType Type of orders to retrieve (Buy/Sell)
@@ -444,17 +461,22 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     ) external view returns (uint256[] memory) {
         bytes32 queueKey = _getQueueKey(token, orderType, executionType);
 
-        uint256[] memory activeOrders;
-        // Count active orders
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < totalOrderCount[queueKey]; i++) {
+        uint256 activeCount = getActiveOrdersCount(queueKey);
+        // Create array of active orders
+        uint256 currentIndex = 0;
+        uint256[] memory activeOrders = new uint256[](activeCount);
+        for (
+            uint256 i = 0;
+            i < totalOrderCount[queueKey] && currentIndex < activeCount;
+            i++
+        ) {
             uint256 orderId = orderQueues[queueKey][i];
             if (
                 orders[orderId].status == OrderStatus.Active &&
                 !isOrderExpired(orderId)
             ) {
-                activeOrders[activeCount] = orderId;
-                activeCount++;
+                activeOrders[currentIndex] = orderId;
+                currentIndex++;
             }
         }
         return activeOrders;
@@ -618,11 +640,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Update order statuses and remove from queues if fully filled
         if (buyOrder.filledAmount == buyOrder.amount) {
             buyOrder.status = OrderStatus.Filled;
-            bytes32 buyQueueKey = _getQueueKey(
-                buyOrder.token,
-                buyOrder.orderType,
-                buyOrder.executionType
-            );
+
             emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -634,11 +652,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (sellOrder.filledAmount == sellOrder.amount) {
             sellOrder.status = OrderStatus.Filled;
-            bytes32 sellQueueKey = _getQueueKey(
-                sellOrder.token,
-                sellOrder.orderType,
-                sellOrder.executionType
-            );
+
             emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -738,11 +752,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Update order statuses and remove from queues if fully filled
         if (buyOrder.filledAmount == buyOrder.amount) {
             buyOrder.status = OrderStatus.Filled;
-            bytes32 buyQueueKey = _getQueueKey(
-                buyOrder.token,
-                buyOrder.orderType,
-                buyOrder.executionType
-            );
             emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -754,11 +763,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (sellOrder.filledAmount == sellOrder.amount) {
             sellOrder.status = OrderStatus.Filled;
-            bytes32 sellQueueKey = _getQueueKey(
-                sellOrder.token,
-                sellOrder.orderType,
-                sellOrder.executionType
-            );
+
             emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -841,7 +846,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Store the position of the order in the queue
         orderQueuePositions[orderId] = totalOrderCount[queueKey];
         orderQueues[queueKey][totalOrderCount[queueKey]] = orderId;
-        totalOrderCount[queueKey]++;
+        totalOrderCount[queueKey] += 1;
     }
 
     /// @notice Emergency function to withdraw stuck tokens
