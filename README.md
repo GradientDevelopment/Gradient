@@ -1,17 +1,21 @@
-# Gradient Orderbook
+# Gradient Orderbook V2
 
-A decentralized orderbook smart contract for trading ERC20 tokens against ETH. This contract implements a limit order system with order matching and fulfillment capabilities.
+A decentralized orderbook smart contract for trading ERC20 tokens against ETH. This contract implements both limit and market order systems with order matching and fulfillment capabilities.
 
 ## Features
 
 - Trade any ERC20 token against ETH
-- Limit order support
+- Limit and market order support
 - Order matching system
 - Whitelisted fulfiller system
 - Non-custodial trading
 - Gas-efficient order management
 - Order expiration mechanism
 - Partial fill support
+- Order size limits
+- Maximum TTL enforcement
+- Emergency withdrawal mechanism
+- Paged order retrieval
 
 ## Contract Overview
 
@@ -20,6 +24,10 @@ The Orderbook contract provides the following key functionalities:
 ### Order Types
 - **Buy Orders**: Place orders to buy tokens with ETH
 - **Sell Orders**: Place orders to sell tokens for ETH
+
+### Execution Types
+- **Limit Orders**: Execute at a specific price or better
+- **Market Orders**: Execute at the best available price (with price limits)
 
 ### Order States
 - **Active**: Order is available for fulfillment
@@ -30,23 +38,31 @@ The Orderbook contract provides the following key functionalities:
 ### Key Functions
 
 #### For Traders
-- `createOrder`: Create a new buy or sell order
+- `createOrder`: Create a new buy or sell order (limit or market)
   - For buy orders: Send ETH with the transaction
   - For sell orders: Approve token transfer before calling
 - `cancelOrder`: Cancel an active order
 - `getOrder`: Get detailed information about an order
 - `getRemainingAmount`: Check unfilled amount of an order
 - `getActiveOrders`: Get list of active orders for a token
+- `getActiveOrdersPaged`: Get paginated list of active orders
+- `cleanupExpiredOrder`: Clean up expired orders and get refunds
 
 #### For Fulfillers
-- `fulfillMatchedOrders`: Execute matched orders (whitelisted fulfillers only)
+- `fulfillLimitOrders`: Execute matched limit orders (whitelisted fulfillers only)
+- `fulfillMarketOrders`: Execute matched market orders (whitelisted fulfillers only)
 
 #### For Admin
 - `setFulfillerStatus`: Whitelist or unwhitelist order fulfillers
+- `setFeePercentage`: Update the trading fee percentage
+- `withdrawFees`: Withdraw collected fees
+- `setOrderSizeLimits`: Update minimum and maximum order sizes
+- `setMaxOrderTtl`: Update maximum order time-to-live
+- `emergencyWithdraw`: Emergency withdrawal of stuck tokens or ETH
 
 ## Usage
 
-### Creating a Buy Order
+### Creating a Limit Buy Order
 
 ```solidity
 // Amount of tokens to buy
@@ -56,12 +72,14 @@ uint256 price = 0.1 * 1e18;   // 0.1 ETH per token
 // Time-to-live in seconds
 uint256 ttl = 3600;           // 1 hour
 
-// Calculate total ETH needed
+// Calculate total ETH needed (including fee)
 uint256 totalEth = (amount * price) / 1e18;
+uint256 fee = (totalEth * feePercentage) / DIVISOR;
 
 // Create buy order
-orderbook.createOrder{value: totalEth}(
+orderbook.createOrder{value: totalEth + fee}(
     OrderType.Buy,
+    OrderExecutionType.Limit,
     tokenAddress,
     amount,
     price,
@@ -69,29 +87,24 @@ orderbook.createOrder{value: totalEth}(
 );
 ```
 
-### Creating a Sell Order
+### Creating a Market Sell Order
 
 ```solidity
 // First approve token transfer
 IERC20(tokenAddress).approve(orderbookAddress, amount);
 
-// Create sell order
+// Create market sell order with minimum price
 orderbook.createOrder(
     OrderType.Sell,
+    OrderExecutionType.Market,
     tokenAddress,
     amount,
-    price,
+    minPrice,  // Minimum acceptable price
     ttl
 );
 ```
 
-### Cancelling an Order
-
-```solidity
-orderbook.cancelOrder(orderId);
-```
-
-### Fulfilling Orders (Whitelisted Fulfillers Only)
+### Fulfilling Limit Orders (Whitelisted Fulfillers Only)
 
 ```solidity
 OrderMatch[] memory matches = new OrderMatch[](1);
@@ -101,7 +114,23 @@ matches[0] = OrderMatch({
     fillAmount: fillAmount
 });
 
-orderbook.fulfillMatchedOrders(matches);
+orderbook.fulfillLimitOrders(matches);
+```
+
+### Fulfilling Market Orders (Whitelisted Fulfillers Only)
+
+```solidity
+OrderMatch[] memory matches = new OrderMatch[](1);
+uint256[] memory executionPrices = new uint256[](1);
+
+matches[0] = OrderMatch({
+    buyOrderId: buyOrderId,
+    sellOrderId: sellOrderId,
+    fillAmount: fillAmount
+});
+executionPrices[0] = currentMarketPrice;
+
+orderbook.fulfillMarketOrders(matches, executionPrices);
 ```
 
 ## Security Features
@@ -113,6 +142,10 @@ orderbook.fulfillMatchedOrders(matches);
 - Expiration mechanism for stale orders
 - Checks-Effects-Interactions pattern
 - No direct token pair trading to prevent price manipulation
+- Order size limits to prevent market manipulation
+- Maximum TTL enforcement
+- Emergency withdrawal mechanism
+- Fee percentage limits
 
 ## Events
 
@@ -124,6 +157,10 @@ The contract emits the following events:
 - `OrderFulfilled`: When an order is completely filled
 - `OrderPartiallyFulfilled`: When an order is partially filled
 - `FulfillerWhitelisted`: When a fulfiller's status changes
+- `FeePercentageUpdated`: When the fee percentage is updated
+- `FeesWithdrawn`: When fees are withdrawn
+- `OrderSizeLimitsUpdated`: When order size limits are updated
+- `MaxTTLUpdated`: When maximum TTL is updated
 
 ## Dependencies
 
@@ -131,6 +168,7 @@ The contract emits the following events:
   - `@openzeppelin/contracts/token/ERC20/IERC20.sol`
   - `@openzeppelin/contracts/access/Ownable.sol`
   - `@openzeppelin/contracts/utils/ReentrancyGuard.sol`
+  - `@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol`
 
 ## Development
 
