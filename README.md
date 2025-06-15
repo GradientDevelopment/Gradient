@@ -60,6 +60,11 @@ The Orderbook contract provides the following key functionalities:
 - `setMaxOrderTtl`: Update maximum order time-to-live
 - `emergencyWithdraw`: Emergency withdrawal of stuck tokens or ETH
 
+### Order Limits
+- Minimum order size: 0.000001 ETH (1e6 wei)
+- Maximum order size: 1000 ETH
+- Maximum order TTL: 30 days
+
 ## Usage
 
 ### Creating a Limit Buy Order
@@ -69,12 +74,12 @@ The Orderbook contract provides the following key functionalities:
 uint256 amount = 1000 * 1e18; // Assuming 18 decimals
 // Price per token in ETH (18 decimals)
 uint256 price = 0.1 * 1e18;   // 0.1 ETH per token
-// Time-to-live in seconds
+// Time-to-live in seconds (max 30 days)
 uint256 ttl = 3600;           // 1 hour
 
 // Calculate total ETH needed (including fee)
 uint256 totalEth = (amount * price) / 1e18;
-uint256 fee = (totalEth * feePercentage) / DIVISOR;
+uint256 fee = (totalEth * feePercentage) / 10000; // Using DIVISOR (10000)
 
 // Create buy order
 orderbook.createOrder{value: totalEth + fee}(
@@ -182,19 +187,19 @@ The contract emits the following events:
 
 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/gradient_orderbook.git
-cd gradient_orderbook
+git clone https://github.com/GradientDevelopment/Gradient.git
+cd Gradient
 ```
 
 2. Install dependencies
 ```bash
-npm install
+yarn install
 ```
 
 ### Testing
 
 ```bash
-npm test
+yarn test
 ```
 
 ## License
