@@ -19,24 +19,31 @@ A decentralized orderbook smart contract for trading ERC20 tokens against ETH. T
 This diagram illustrates the primary user flows and contract interactions within the Gradient protocol.
 
 ```
-+----------+      +-----------+      +--------------------+
-|  Trader  |      | Fulfiller |      | Liquidity Provider |
-+----+-----+      +-----+-----+      +----------+---------+
-     |                  |                       |
-(Create/Cancel/AMM)     | (Executes Matches)    | (Adds/Removes Liquidity)
-     |                  |                       |
-     v                  v                       v
-+-----------------------------------------------------------+
-|                     GradientOrderbook                     |
-+-----------------------------------------------------------+
-     |         ^                             |
-     |         | (AMM Self-Fulfill)          | (Fulfill from Pool)
-     |         |                             |
-     v         +-----------------------------+
-+----------+                                 v
-| External |       +-------------------------------------------+
-|   AMM    |       |         GradientMarketMakerPool         |
-+----------+       +-------------------------------------------+
+                                     +--------------------+
+                                     | Liquidity Provider |
+                                     +----------+---------+
+                                                |
+                                   (Adds/Removes Liquidity)
+                                                |
+                                                v
++----------+      +-----------+      +-------------------------------------------+
+|  Trader  |      | Fulfiller |      |         GradientMarketMakerPool         |
++----+-----+      +-----+-----+      +--------------------+--------------------+
+     |                  |                                  ^
+(Create/Cancel/AMM)     | (Executes Matches)               | (Fulfill from Pool)
+     |                  |                                  |
+     v                  v                                  |
++--------------------------------------------------------------------+
+|                          GradientOrderbook                         |
++--------------------------------------------------------------------+
+     |         ^
+     |         | (AMM Self-Fulfill)
+     |         |
+     v         +
++----------+
+| External |
+|   AMM    |
++----------+
 ```
 
 Note: All core contracts use the GradientRegistry for service discovery (not shown for clarity).
