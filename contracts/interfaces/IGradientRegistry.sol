@@ -18,21 +18,22 @@ interface IGradientRegistry {
     );
     event ContractAuthorized(address indexed contractAddress, bool authorized);
     event RewardDistributorSet(address indexed rewardDistributor);
+    event FulfillerAuthorized(address indexed fulfiller, bool status);
 
     /**
      * @notice Set the main contract addresses
      * @param _marketMakerPool Address of the MarketMakerPool contract
-     * @param _uniswapPair Address of the UniswapV2Pair contract
      * @param _gradientToken Address of the Gradient token contract
-     * @param _rewardDistributor Address of the reward distributor contract
      * @param _feeCollector Address of the fee collector contract
+     * @param _orderbook Address of the Orderbook contract
+     * @param _fallbackExecutor Address of the FallbackExecutor contract
      */
     function setMainContracts(
         address _marketMakerPool,
-        address _uniswapPair,
         address _gradientToken,
-        address _rewardDistributor,
-        address _feeCollector
+        address _feeCollector,
+        address _orderbook,
+        address _fallbackExecutor
     ) external;
 
     /**
@@ -56,21 +57,24 @@ interface IGradientRegistry {
     ) external;
 
     /**
-     * @notice Authorize or deauthorize a contract
-     * @param contractAddress The address of the contract
-     * @param authorized Whether the contract should be authorized
-     */
-    function setContractAuthorization(
-        address contractAddress,
-        bool authorized
-    ) external;
-
-    /**
      * @notice Set the block status of a token
      * @param token The address of the token to set the block status of
      * @param blocked Whether the token should be blocked
      */
     function setTokenBlockStatus(address token, bool blocked) external;
+
+    /**
+     * @notice Set a reward distributor address
+     * @param rewardDistributor The address of the reward distributor to authorize
+     */
+    function setRewardDistributor(address rewardDistributor) external;
+
+    /**
+     * @notice Authorize or deauthorize a fulfiller
+     * @param fulfiller The address of the fulfiller to authorize
+     * @param status The status of the fulfiller
+     */
+    function authorizeFulfiller(address fulfiller, bool status) external;
 
     /**
      * @notice Check if a contract is authorized
@@ -82,38 +86,43 @@ interface IGradientRegistry {
     ) external view returns (bool);
 
     /**
+     * @notice Check if an address is an authorized fulfiller
+     * @param fulfiller The address to check
+     * @return bool Whether the address is an authorized fulfiller
+     */
+    function isAuthorizedFulfiller(
+        address fulfiller
+    ) external view returns (bool);
+
+    /**
      * @notice Get all main contract addresses
      * @return _marketMakerPool Address of the MarketMakerPool contract
-     * @return _uniswapPair Address of the UniswapV2Pair contract
      * @return _gradientToken Address of the Gradient token contract
-     * @return _rewardDistributor Address of the reward distributor contract
      * @return _feeCollector Address of the fee collector contract
+     * @return _orderbook Address of the Orderbook contract
+     * @return _fallbackExecutor Address of the FallbackExecutor contract
      */
     function getAllMainContracts()
         external
         view
         returns (
             address _marketMakerPool,
-            address _uniswapPair,
             address _gradientToken,
-            address _rewardDistributor,
-            address _feeCollector
+            address _feeCollector,
+            address _orderbook,
+            address _fallbackExecutor
         );
 
     // View functions for individual contract addresses
     function marketMakerPool() external view returns (address);
 
-    function uniswapPair() external view returns (address);
-
     function gradientToken() external view returns (address);
-
-    function rewardDistributor() external view returns (address);
 
     function feeCollector() external view returns (address);
 
-    function getOrderbook() external view returns (address);
+    function orderbook() external view returns (address);
 
-    function getFallbackExecutor() external view returns (address);
+    function fallbackExecutor() external view returns (address);
 
     // View functions for mappings
     function blockedTokens(address token) external view returns (bool);
@@ -126,5 +135,9 @@ interface IGradientRegistry {
 
     function isRewardDistributor(
         address rewardDistributor
+    ) external view returns (bool);
+
+    function authorizedFulfillers(
+        address fulfiller
     ) external view returns (bool);
 }

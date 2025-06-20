@@ -85,9 +85,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @dev Used for efficient removal of orders from queues
     mapping(uint256 => uint256) private orderQueuePositions;
 
-    /// @notice Mapping of addresses allowed to fulfill orders
-    mapping(address => bool) public whitelistedFulfillers;
-
     uint256 public constant DIVISOR = 10000;
 
     uint256 public minOrderSize;
@@ -124,9 +121,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 remaining
     );
-
-    /// @notice Emitted when a fulfiller's whitelist status changes
-    event FulfillerWhitelisted(address indexed fulfiller, bool status);
 
     /// @notice Emitted when fee percentage is updated
     event FeePercentageUpdated(
@@ -172,8 +166,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     );
 
     // Modifiers
-    modifier onlyWhitelistedFulfiller() {
-        require(whitelistedFulfillers[msg.sender], "Caller is not whitelisted");
+    modifier onlyAuthorizedFulfiller() {
+        require(
+            gradientRegistry.isAuthorizedFulfiller(msg.sender),
+            "Caller is not authorized"
+        );
         _;
     }
 
@@ -195,7 +192,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
-        whitelistedFulfillers[msg.sender] = true;
         feePercentage = 50; // Default 0.5%
 
         minOrderSize = 1e6; // Example: 0.000001 ETH
@@ -242,18 +238,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         OrderExecutionType executionType
     ) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(token, orderType, executionType));
-    }
-
-    /// @notice Sets or removes a fulfiller's whitelisted status
-    /// @param fulfiller Address of the fulfiller to modify
-    /// @param status New status for the fulfiller (true = whitelisted, false = not whitelisted)
-    /// @dev Only callable by contract owner
-    function setFulfillerStatus(
-        address fulfiller,
-        bool status
-    ) external onlyOwner {
-        whitelistedFulfillers[fulfiller] = status;
-        emit FulfillerWhitelisted(fulfiller, status);
     }
 
     function setOrderSizeLimits(
@@ -552,7 +536,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @dev This function matches buy and sell orders against each other
     function fulfillLimitOrders(
         OrderMatch[] calldata matches
-    ) external nonReentrant onlyWhitelistedFulfiller {
+    ) external nonReentrant onlyAuthorizedFulfiller {
         require(matches.length > 0, "No order matches to fulfill");
 
         for (uint256 i = 0; i < matches.length; i++) {
@@ -569,7 +553,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     function fulfillMarketOrders(
         OrderMatch[] calldata matches,
         uint256[] calldata executionPrices
-    ) external nonReentrant onlyWhitelistedFulfiller {
+    ) external nonReentrant onlyAuthorizedFulfiller {
         require(matches.length > 0, "No order matches to fulfill");
         require(
             matches.length == executionPrices.length,
@@ -1131,7 +1115,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     function fulfillOrdersWithMarketMaker(
         uint256[] calldata orderIds,
         uint256[] calldata fillAmounts
-    ) external nonReentrant onlyWhitelistedFulfiller {
+    ) external nonReentrant onlyAuthorizedFulfiller {
         require(orderIds.length > 0, "No orders to fulfill");
         require(
             orderIds.length == fillAmounts.length,

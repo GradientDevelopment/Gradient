@@ -68,7 +68,7 @@ contract GradientMarketMakerPool is
 
     modifier onlyOrderbook() {
         require(
-            msg.sender == gradientRegistry.getOrderbook(),
+            msg.sender == gradientRegistry.orderbook(),
             "Only orderbook can call this function"
         );
         _;

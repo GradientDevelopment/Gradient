@@ -11,7 +11,6 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 contract GradientRegistry is Ownable {
     // Contract addresses
     address public marketMakerPool;
-    address public uniswapPair;
     address public gradientToken;
     address public feeCollector;
     address public orderbook;
@@ -27,6 +26,9 @@ contract GradientRegistry is Ownable {
     // Access control for contracts that can call certain functions
     mapping(address => bool) public authorizedContracts;
 
+    // Mapping for authorized fulfillers
+    mapping(address => bool) public authorizedFulfillers;
+
     // Events
     event ContractAddressUpdated(
         string indexed contractName,
@@ -39,13 +41,13 @@ contract GradientRegistry is Ownable {
     );
     event ContractAuthorized(address indexed contractAddress, bool authorized);
     event RewardDistributorSet(address indexed rewardDistributor);
+    event FulfillerAuthorized(address indexed fulfiller, bool status);
 
     constructor() Ownable(msg.sender) {}
 
     /**
      * @notice Set the main contract addresses
      * @param _marketMakerPool Address of the MarketMakerPool contract
-     * @param _uniswapPair Address of the UniswapV2Pair contract
      * @param _gradientToken Address of the Gradient token contract
      * @param _feeCollector Address of the fee collector contract
      * @param _orderbook Address of the Orderbook contract
@@ -53,28 +55,16 @@ contract GradientRegistry is Ownable {
      */
     function setMainContracts(
         address _marketMakerPool,
-        address _uniswapPair,
         address _gradientToken,
         address _feeCollector,
         address _orderbook,
         address _fallbackExecutor
     ) external onlyOwner {
-        require(_marketMakerPool != address(0), "Invalid MM pool address");
-        require(_uniswapPair != address(0), "Invalid Uniswap pair address");
-        require(_gradientToken != address(0), "Invalid token address");
-        require(_feeCollector != address(0), "Invalid collector address");
-        require(_orderbook != address(0), "Invalid orderbook address");
-        require(
-            _fallbackExecutor != address(0),
-            "Invalid fallback executor address"
-        );
-
         emit ContractAddressUpdated(
             "MarketMakerPool",
             marketMakerPool,
             _marketMakerPool
         );
-        emit ContractAddressUpdated("UniswapPair", uniswapPair, _uniswapPair);
         emit ContractAddressUpdated(
             "GradientToken",
             gradientToken,
@@ -93,7 +83,6 @@ contract GradientRegistry is Ownable {
         );
 
         marketMakerPool = _marketMakerPool;
-        uniswapPair = _uniswapPair;
         gradientToken = _gradientToken;
         feeCollector = _feeCollector;
         orderbook = _orderbook;
@@ -142,9 +131,6 @@ contract GradientRegistry is Ownable {
         if (nameHash == keccak256(bytes("MarketMakerPool"))) {
             oldAddress = marketMakerPool;
             marketMakerPool = newAddress;
-        } else if (nameHash == keccak256(bytes("UniswapPair"))) {
-            oldAddress = uniswapPair;
-            uniswapPair = newAddress;
         } else if (nameHash == keccak256(bytes("GradientToken"))) {
             oldAddress = gradientToken;
             gradientToken = newAddress;
@@ -208,7 +194,6 @@ contract GradientRegistry is Ownable {
     /**
      * @notice Get all main contract addresses
      * @return _marketMakerPool Address of the MarketMakerPool contract
-     * @return _uniswapPair Address of the UniswapV2Pair contract
      * @return _gradientToken Address of the Gradient token contract
      * @return _feeCollector Address of the fee collector contract
      * @return _orderbook Address of the Orderbook contract
@@ -219,7 +204,6 @@ contract GradientRegistry is Ownable {
         view
         returns (
             address _marketMakerPool,
-            address _uniswapPair,
             address _gradientToken,
             address _feeCollector,
             address _orderbook,
@@ -228,7 +212,6 @@ contract GradientRegistry is Ownable {
     {
         return (
             marketMakerPool,
-            uniswapPair,
             gradientToken,
             feeCollector,
             orderbook,
@@ -258,5 +241,30 @@ contract GradientRegistry is Ownable {
      */
     function getFallbackExecutor() external view returns (address) {
         return fallbackExecutor;
+    }
+
+    /**
+     * @notice Authorize or deauthorize a fulfiller
+     * @param fulfiller The address of the fulfiller to authorize
+     * @param status The status of the fulfiller
+     */
+    function authorizeFulfiller(
+        address fulfiller,
+        bool status
+    ) external onlyOwner {
+        require(fulfiller != address(0), "Invalid fulfiller address");
+        authorizedFulfillers[fulfiller] = status;
+        emit FulfillerAuthorized(fulfiller, status);
+    }
+
+    /**
+     * @notice Check if an address is an authorized fulfiller
+     * @param fulfiller The address to check
+     * @return bool Whether the address is an authorized fulfiller
+     */
+    function isAuthorizedFulfiller(
+        address fulfiller
+    ) external view returns (bool) {
+        return authorizedFulfillers[fulfiller];
     }
 }
