@@ -1,19 +1,16 @@
 # Gradient Orderbook V2
 
-A decentralized orderbook smart contract for trading ERC20 tokens against ETH. This contract implements both limit and market order systems with order matching and fulfillment capabilities.
+A decentralized orderbook smart contract for trading ERC20 tokens against ETH. This contract implements a hybrid liquidity model, combining a traditional peer-to-peer (P2P) order matching system with the ability to source liquidity from a dedicated Market Maker (MM) pool.
 
 ## Features
 
+- **Hybrid Liquidity**: Fulfills orders via P2P matching or a dedicated Market Maker pool.
 - Trade any ERC20 token against ETH
 - Limit and market order support
-- Order matching system
-- Whitelisted fulfiller system
+- Whitelisted fulfiller system for executing trades
 - Non-custodial trading
-- Gas-efficient order management
-- Order expiration mechanism
-- Partial fill support
-- Order size limits
-- Maximum TTL enforcement
+- Order expiration mechanism and partial fill support
+- **Self-Fulfillment**: Allows users to unlock their order's assets to trade on an external AMM.
 - Emergency withdrawal mechanism
 - Paged order retrieval
 
@@ -38,27 +35,26 @@ The Orderbook contract provides the following key functionalities:
 ### Key Functions
 
 #### For Traders
-- `createOrder`: Create a new buy or sell order (limit or market)
-  - For buy orders: Send ETH with the transaction
-  - For sell orders: Approve token transfer before calling
-- `cancelOrder`: Cancel an active order
-- `getOrder`: Get detailed information about an order
-- `getRemainingAmount`: Check unfilled amount of an order
-- `getActiveOrders`: Get list of active orders for a token
-- `getActiveOrdersPaged`: Get paginated list of active orders
-- `cleanupExpiredOrder`: Clean up expired orders and get refunds
+- `createOrder`: Create a new buy or sell order (limit or market).
+- `cancelOrder`: Cancel an active order.
+- `fulfillOwnOrderWithAMM`: Unlocks assets from an order, allowing the user to execute the trade on an external AMM.
+- `getOrder`: Get detailed information about an order.
+- `getActiveOrdersPaged`: Get a paginated list of active orders.
+- `cleanupExpiredOrder`: Clean up expired orders and get refunds.
 
-#### For Fulfillers
-- `fulfillLimitOrders`: Execute matched limit orders (whitelisted fulfillers only)
-- `fulfillMarketOrders`: Execute matched market orders (whitelisted fulfillers only)
+#### For Fulfillers (Whitelisted)
+- `fulfillLimitOrders`: Execute matched limit orders between two users (P2P).
+- `fulfillMarketOrders`: Execute matched market orders between two users (P2P).
+- `fulfillOrdersWithMarketMaker`: Fulfill one or more orders using liquidity from the `GradientMarketMakerPool`.
 
 #### For Admin
-- `setFulfillerStatus`: Whitelist or unwhitelist order fulfillers
-- `setFeePercentage`: Update the trading fee percentage
-- `withdrawFees`: Withdraw collected fees
-- `setOrderSizeLimits`: Update minimum and maximum order sizes
-- `setMaxOrderTtl`: Update maximum order time-to-live
-- `emergencyWithdraw`: Emergency withdrawal of stuck tokens or ETH
+- `setFulfillerStatus`: Whitelist or unwhitelist order fulfillers.
+- `setFeePercentage`: Update the trading fee percentage.
+- `updateMMFeeDistributionPercentage`: Set the percentage of fees distributed to the MM pool.
+- `withdrawFees`: Withdraw the platform's share of collected fees.
+- `setOrderSizeLimits`: Update minimum and maximum order sizes.
+- `setMaxOrderTtl`: Update maximum order time-to-live.
+- `emergencyWithdraw`: Emergency withdrawal of stuck tokens or ETH.
 
 ### Order Limits
 - Minimum order size: 0.000001 ETH (1e6 wei)
@@ -92,50 +88,16 @@ orderbook.createOrder{value: totalEth + fee}(
 );
 ```
 
-### Creating a Market Sell Order
+### Fulfilling Orders with Market Maker (Whitelisted Fulfillers Only)
 
 ```solidity
-// First approve token transfer
-IERC20(tokenAddress).approve(orderbookAddress, amount);
+uint256[] memory orderIds = new uint256[](1);
+orderIds[0] = orderIdToFill;
 
-// Create market sell order with minimum price
-orderbook.createOrder(
-    OrderType.Sell,
-    OrderExecutionType.Market,
-    tokenAddress,
-    amount,
-    minPrice,  // Minimum acceptable price
-    ttl
-);
-```
+uint256[] memory fillAmounts = new uint256[](1);
+fillAmounts[0] = amountToFill;
 
-### Fulfilling Limit Orders (Whitelisted Fulfillers Only)
-
-```solidity
-OrderMatch[] memory matches = new OrderMatch[](1);
-matches[0] = OrderMatch({
-    buyOrderId: buyOrderId,
-    sellOrderId: sellOrderId,
-    fillAmount: fillAmount
-});
-
-orderbook.fulfillLimitOrders(matches);
-```
-
-### Fulfilling Market Orders (Whitelisted Fulfillers Only)
-
-```solidity
-OrderMatch[] memory matches = new OrderMatch[](1);
-uint256[] memory executionPrices = new uint256[](1);
-
-matches[0] = OrderMatch({
-    buyOrderId: buyOrderId,
-    sellOrderId: sellOrderId,
-    fillAmount: fillAmount
-});
-executionPrices[0] = currentMarketPrice;
-
-orderbook.fulfillMarketOrders(matches, executionPrices);
+orderbook.fulfillOrdersWithMarketMaker(orderIds, fillAmounts);
 ```
 
 ## Security Features
@@ -146,11 +108,7 @@ orderbook.fulfillMarketOrders(matches, executionPrices);
 - Safe ETH transfer handling
 - Expiration mechanism for stale orders
 - Checks-Effects-Interactions pattern
-- No direct token pair trading to prevent price manipulation
 - Order size limits to prevent market manipulation
-- Maximum TTL enforcement
-- Emergency withdrawal mechanism
-- Fee percentage limits
 
 ## Events
 
@@ -161,27 +119,28 @@ The contract emits the following events:
 - `OrderExpired`: When an order expires
 - `OrderFulfilled`: When an order is completely filled
 - `OrderPartiallyFulfilled`: When an order is partially filled
+- `OrderFulfilledByMatching`: When an order is filled via P2P matching.
+- `OrderFulfilledByMarketMaker`: When an order is filled via the MM pool.
+- `FeeDistributedToPool`: When fees are sent to the MM pool.
 - `FulfillerWhitelisted`: When a fulfiller's status changes
 - `FeePercentageUpdated`: When the fee percentage is updated
 - `FeesWithdrawn`: When fees are withdrawn
 - `OrderSizeLimitsUpdated`: When order size limits are updated
 - `MaxTTLUpdated`: When maximum TTL is updated
+- `MMFeeDistributionPercentageUpdated`: When the MM fee share is updated.
 
 ## Dependencies
 
-- OpenZeppelin Contracts v4.x
-  - `@openzeppelin/contracts/token/ERC20/IERC20.sol`
-  - `@openzeppelin/contracts/access/Ownable.sol`
-  - `@openzeppelin/contracts/utils/ReentrancyGuard.sol`
-  - `@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol`
+- OpenZeppelin Contracts
+- Gradient Protocol Interfaces (`IGradientRegistry`, `IGradientMarketMakerPool`)
 
 ## Development
 
 ### Prerequisites
 
 - Node.js v14+
-- Hardhat or Foundry
-- OpenZeppelin Contracts
+- Yarn or Npm
+- Hardhat
 
 ### Installation
 
