@@ -5,12 +5,17 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./interfaces/IGradientRegistry.sol";
+import "./interfaces/IGradientMarketMakerPool.sol";
 
 /// @title GradientOrderbook
 /// @notice A decentralized orderbook for trading ERC20 tokens against ETH
 /// @dev Implements a limit order system with order matching and fulfillment
 contract GradientOrderbook is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    /// @notice Registry contract for accessing other protocol contracts
+    IGradientRegistry public immutable gradientRegistry;
 
     /// @notice Types of orders that can be placed
     enum OrderType {
@@ -45,14 +50,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 filledAmount; // Amount of tokens that have been filled
         uint256 expirationTime; // Timestamp when the order expires
         OrderStatus status; // Current status of the order
-    }
-
-    /// @notice Parameters required for order fulfillment
-    struct FulfillmentParams {
-        uint256 orderId; // ID of the order to fulfill
-        uint256 fillAmount; // Amount of tokens to fill
-        uint256 price; // Price at which to fill
-        address counterparty; // Address of the counterparty
     }
 
     /// @notice Parameters for matching orders
@@ -95,6 +92,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     uint256 public minOrderSize;
     uint256 public maxOrderSize;
     uint256 public maxOrderTtl;
+
+    uint256 public mmFeeDistributionPercentage = 7000; // 70% default
 
     /// @notice Emitted when a new order is created
     event OrderCreated(
@@ -141,6 +140,36 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     event MaxTTLUpdated(uint256 newMaxTTL);
     event RateLimitUpdated(uint256 newInterval);
 
+    /// @notice Emitted when an order is fulfilled through matching
+    event OrderFulfilledByMatching(
+        uint256 indexed orderId,
+        uint256 indexed matchedOrderId,
+        uint256 amount,
+        uint256 price
+    );
+
+    /// @notice Emitted when an order is fulfilled through market maker
+    event OrderFulfilledByMarketMaker(
+        uint256 indexed orderId,
+        address indexed marketMakerPool,
+        uint256 amount,
+        uint256 price
+    );
+
+    /// @notice Emitted when fees are distributed to market maker pool
+    event FeeDistributedToPool(
+        address indexed marketMakerPool,
+        address indexed token,
+        uint256 amount,
+        uint256 totalFee
+    );
+
+    /// @notice Emitted when MM fee distribution percentage is updated
+    event MMFeeDistributionPercentageUpdated(
+        uint256 oldPercentage,
+        uint256 newPercentage
+    );
+
     // Modifiers
     modifier onlyWhitelistedFulfiller() {
         require(whitelistedFulfillers[msg.sender], "Caller is not whitelisted");
@@ -163,7 +192,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         _;
     }
 
-    constructor() Ownable(msg.sender) {
+    constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
+        gradientRegistry = _gradientRegistry;
         whitelistedFulfillers[msg.sender] = true;
         feePercentage = 50; // Default 0.5%
 
@@ -518,6 +548,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @param matches Array of OrderMatch structs containing match details
     /// @dev Only whitelisted fulfillers can call this function
     /// @dev All orders in matches must be limit orders
+    /// @dev This function matches buy and sell orders against each other
     function fulfillLimitOrders(
         OrderMatch[] calldata matches
     ) external nonReentrant onlyWhitelistedFulfiller {
@@ -528,11 +559,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice Fulfills multiple matched market orders
+    /// @notice Fulfills multiple matched market orders through order matching
     /// @param matches Array of OrderMatch structs containing match details
     /// @param executionPrices Array of execution prices for each match
     /// @dev Only whitelisted fulfillers can call this function
     /// @dev All orders in matches must be market orders
+    /// @dev This function matches buy and sell orders against each other
     function fulfillMarketOrders(
         OrderMatch[] calldata matches,
         uint256[] calldata executionPrices
@@ -574,7 +606,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(
             !isOrderExpired(_match.buyOrderId) &&
                 !isOrderExpired(_match.sellOrderId),
-            "Orders expired"
+            "1 of the orders expired"
         );
         require(
             buyOrder.orderType == OrderType.Buy &&
@@ -583,10 +615,25 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         );
         require(buyOrder.token == sellOrder.token, "Token mismatch");
         require(
+            buyOrder.owner != sellOrder.owner,
+            "Seller and buyer cannot be the same"
+        );
+        require(
             buyOrder.executionType == OrderExecutionType.Limit &&
                 sellOrder.executionType == OrderExecutionType.Limit,
             "Not limit orders"
         );
+
+        // Handle different fulfillment types
+        _fulfillLimitOrdersMatching(_match);
+    }
+
+    /// @notice Internal function to fulfill limit orders through matching
+    /// @param _match OrderMatch struct containing the match details
+    function _fulfillLimitOrdersMatching(OrderMatch memory _match) internal {
+        Order storage buyOrder = orders[_match.buyOrderId];
+        Order storage sellOrder = orders[_match.sellOrderId];
+
         require(
             buyOrder.price >= sellOrder.price,
             "Price mismatch for limit orders"
@@ -640,7 +687,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Update order statuses and remove from queues if fully filled
         if (buyOrder.filledAmount == buyOrder.amount) {
             buyOrder.status = OrderStatus.Filled;
-
             emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -652,7 +698,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (sellOrder.filledAmount == sellOrder.amount) {
             sellOrder.status = OrderStatus.Filled;
-
             emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -660,6 +705,169 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 actualFillAmount,
                 sellOrder.amount - sellOrder.filledAmount
             );
+        }
+    }
+
+    /// @notice Internal function to fulfill limit orders through market maker (when both orders use market maker)
+    /// @param _match OrderMatch struct containing the match details
+    /// @dev This is used when both buy and sell orders are fulfilled through the market maker pool
+    function _fulfillLimitOrdersMarketMaker(OrderMatch memory _match) internal {
+        Order storage buyOrder = orders[_match.buyOrderId];
+        Order storage sellOrder = orders[_match.sellOrderId];
+
+        // Get market maker pool address from registry
+        address marketMakerPool = gradientRegistry.marketMakerPool();
+        require(marketMakerPool != address(0), "Market maker pool not set");
+
+        // Calculate actual fill amount based on remaining amounts
+        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
+        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
+        uint256 actualFillAmount = _match.fillAmount;
+
+        // Adjust fill amount if it exceeds either order's remaining amount
+        if (actualFillAmount > buyRemaining) {
+            actualFillAmount = buyRemaining;
+        }
+        if (actualFillAmount > sellRemaining) {
+            actualFillAmount = sellRemaining;
+        }
+
+        require(actualFillAmount > 0, "No amount to fill");
+
+        // Calculate token amounts and fees
+        uint256 tokenAmount = actualFillAmount;
+        uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18;
+
+        // Calculate and collect fees from seller party
+        uint256 sellerFee = _collectFee(paymentAmount);
+
+        // Calculate final amounts after fees
+        uint256 sellerPayment = paymentAmount - sellerFee;
+
+        // Execute transfers through market maker pool
+        if (buyOrder.orderType == OrderType.Buy) {
+            // For buy orders: transfer tokens from market maker pool to buyer
+            IGradientMarketMakerPool(marketMakerPool).transferTokenToOrderbook(
+                sellOrder.token,
+                tokenAmount
+            );
+            IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
+        } else {
+            // For sell orders: transfer ETH from market maker pool to seller
+            IGradientMarketMakerPool(marketMakerPool).transferETHToOrderbook(
+                sellOrder.token,
+                sellerPayment
+            );
+            (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
+            require(success, "ETH transfer to seller failed");
+        }
+
+        // Distribute 70% of fees to market maker pool
+        uint256 feeForPool = (sellerFee * mmFeeDistributionPercentage) /
+            DIVISOR;
+        totalFeesCollected -= feeForPool;
+        if (feeForPool > 0) {
+            IGradientMarketMakerPool(marketMakerPool).receiveFeeDistribution{
+                value: feeForPool
+            }(sellOrder.token);
+            emit FeeDistributedToPool(
+                marketMakerPool,
+                sellOrder.token,
+                feeForPool,
+                sellerFee
+            );
+        }
+
+        // Update order states
+        buyOrder.filledAmount += actualFillAmount;
+        sellOrder.filledAmount += actualFillAmount;
+
+        // Update order statuses
+        if (buyOrder.filledAmount == buyOrder.amount) {
+            buyOrder.status = OrderStatus.Filled;
+            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.buyOrderId,
+                actualFillAmount,
+                buyOrder.amount - buyOrder.filledAmount
+            );
+        }
+
+        if (sellOrder.filledAmount == sellOrder.amount) {
+            sellOrder.status = OrderStatus.Filled;
+            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.sellOrderId,
+                actualFillAmount,
+                sellOrder.amount - sellOrder.filledAmount
+            );
+        }
+    }
+
+    /// @notice Retrieves detailed information about an order
+    /// @param orderId ID of the order to query
+    /// @return Order struct containing all order details
+    function getOrder(
+        uint256 orderId
+    ) external view orderExists(orderId) returns (Order memory) {
+        return orders[orderId];
+    }
+
+    /// @notice Gets the unfilled amount for an order
+    /// @param orderId ID of the order to query
+    /// @return uint256 Amount of tokens/ETH remaining to be filled
+    function getRemainingAmount(
+        uint256 orderId
+    ) external view orderExists(orderId) returns (uint256) {
+        Order storage order = orders[orderId];
+        return order.amount - order.filledAmount;
+    }
+
+    /// @notice Allows the contract to receive ETH
+    /// @dev Required for receiving ETH payments
+    receive() external payable {}
+
+    /// @notice Fallback function that accepts ETH
+    /// @dev Required for receiving ETH payments through alternative methods
+    fallback() external payable {}
+
+    /// @notice Adds an order to its appropriate queue
+    /// @param orderId The ID of the order to add
+    /// @param token The token address
+    /// @param orderType The type of order (Buy/Sell)
+    /// @param executionType The type of execution (Limit/Market)
+    function _addOrderToQueue(
+        uint256 orderId,
+        address token,
+        OrderType orderType,
+        OrderExecutionType executionType
+    ) internal {
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+
+        // Store the position of the order in the queue
+        orderQueuePositions[orderId] = totalOrderCount[queueKey];
+        orderQueues[queueKey][totalOrderCount[queueKey]] = orderId;
+        totalOrderCount[queueKey] += 1;
+    }
+
+    /// @notice Emergency function to withdraw stuck tokens
+    function emergencyWithdraw(
+        address token,
+        address to,
+        uint256 amount
+    ) external onlyOwner {
+        require(to != address(0), "Invalid recipient");
+        if (token == address(0)) {
+            require(
+                amount <= address(this).balance,
+                "Insufficient ETH balance"
+            );
+            (bool success, ) = to.call{value: amount}("");
+            require(success, "ETH transfer failed");
+        } else {
+            IERC20(token).safeTransfer(to, amount);
         }
     }
 
@@ -697,6 +905,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 sellOrder.executionType == OrderExecutionType.Market),
             "Not market orders"
         );
+
+        // Handle different fulfillment types
+        _fulfillMarketOrdersMatching(_match, executionPrice);
+    }
+
+    /// @notice Internal function to fulfill market orders through matching
+    /// @param _match OrderMatch struct containing the match details
+    /// @param executionPrice The price at which the orders will be executed
+    function _fulfillMarketOrdersMatching(
+        OrderMatch memory _match,
+        uint256 executionPrice
+    ) internal {
+        Order storage buyOrder = orders[_match.buyOrderId];
+        Order storage sellOrder = orders[_match.sellOrderId];
 
         // Validate execution price
         if (buyOrder.executionType == OrderExecutionType.Market) {
@@ -763,7 +985,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (sellOrder.filledAmount == sellOrder.amount) {
             sellOrder.status = OrderStatus.Filled;
-
             emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -774,97 +995,304 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice Retrieves detailed information about an order
-    /// @param orderId ID of the order to query
-    /// @return Order struct containing all order details
-    function getOrder(
-        uint256 orderId
-    ) external view orderExists(orderId) returns (Order memory) {
-        return orders[orderId];
-    }
-
-    /// @notice Gets the unfilled amount for an order
-    /// @param orderId ID of the order to query
-    /// @return uint256 Amount of tokens/ETH remaining to be filled
-    function getRemainingAmount(
-        uint256 orderId
-    ) external view orderExists(orderId) returns (uint256) {
-        Order storage order = orders[orderId];
-        return order.amount - order.filledAmount;
-    }
-
-    /// @notice Allows the contract to receive ETH
-    /// @dev Required for receiving ETH payments
-    receive() external payable {}
-
-    /// @notice Fallback function that accepts ETH
-    /// @dev Required for receiving ETH payments through alternative methods
-    fallback() external payable {}
-
-    // /// @notice Removes an order from its queue
-    // /// @param orderId The ID of the order to remove
-    // /// @param queueKey The queue key where the order is stored
-    // /// @dev Uses swap and pop pattern for efficient removal
-    // function _removeOrderFromQueue(uint256 orderId, bytes32 queueKey) internal {
-    //     uint256 position = orderQueuePositions[orderId];
-
-    //     // If order is not in queue, do nothing
-    //     if (
-    //         position >= totalOrderCount[queueKey] ||
-    //         orderQueues[queueKey][position] != orderId
-    //     ) {
-    //         return;
-    //     }
-
-    //     // If order is not the last one, swap with last and update position
-    //     if (position != totalOrderCount[queueKey] - 1) {
-    //         uint256 lastOrderId = orderQueues[queueKey][
-    //             totalOrderCount[queueKey] - 1
-    //         ];
-    //         orderQueues[queueKey][position] = lastOrderId;
-    //         orderQueuePositions[lastOrderId] = position;
-    //     }
-
-    //     // Remove the last element
-    //     queue.pop();
-    //     delete orderQueuePositions[orderId];
-    // }
-
-    /// @notice Adds an order to its appropriate queue
-    /// @param orderId The ID of the order to add
-    /// @param token The token address
-    /// @param orderType The type of order (Buy/Sell)
-    /// @param executionType The type of execution (Limit/Market)
-    function _addOrderToQueue(
-        uint256 orderId,
-        address token,
-        OrderType orderType,
-        OrderExecutionType executionType
+    /// @notice Internal function to fulfill market orders through market maker (when both orders use market maker)
+    /// @param _match OrderMatch struct containing the match details
+    /// @param executionPrice The price at which the orders will be executed
+    /// @dev This is used when both buy and sell orders are fulfilled through the market maker pool
+    function _fulfillMarketOrdersMarketMaker(
+        OrderMatch memory _match,
+        uint256 executionPrice
     ) internal {
-        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+        Order storage buyOrder = orders[_match.buyOrderId];
+        Order storage sellOrder = orders[_match.sellOrderId];
 
-        // Store the position of the order in the queue
-        orderQueuePositions[orderId] = totalOrderCount[queueKey];
-        orderQueues[queueKey][totalOrderCount[queueKey]] = orderId;
-        totalOrderCount[queueKey] += 1;
+        // Get market maker pool address from registry
+        address marketMakerPool = gradientRegistry.marketMakerPool();
+        require(marketMakerPool != address(0), "Market maker pool not set");
+
+        // Validate execution price
+        if (buyOrder.executionType == OrderExecutionType.Market) {
+            require(
+                executionPrice <= buyOrder.price,
+                "Execution price exceeds buyer's max price"
+            );
+        }
+        if (sellOrder.executionType == OrderExecutionType.Market) {
+            require(
+                executionPrice >= sellOrder.price,
+                "Execution price below seller's min price"
+            );
+        }
+
+        // Calculate actual fill amount based on remaining amounts
+        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
+        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
+        uint256 actualFillAmount = _match.fillAmount;
+
+        // Adjust fill amount if it exceeds either order's remaining amount
+        if (actualFillAmount > buyRemaining) {
+            actualFillAmount = buyRemaining;
+        }
+        if (actualFillAmount > sellRemaining) {
+            actualFillAmount = sellRemaining;
+        }
+
+        require(actualFillAmount > 0, "No amount to fill");
+
+        // Calculate token amounts and fees
+        uint256 tokenAmount = actualFillAmount;
+        uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
+
+        // Calculate and collect fees from seller party
+        uint256 sellerFee = _collectFee(paymentAmount);
+
+        // Calculate final amounts after fees
+        uint256 sellerPayment = paymentAmount - sellerFee;
+
+        // Execute transfers through market maker pool
+        if (buyOrder.orderType == OrderType.Buy) {
+            // For buy orders: transfer tokens from market maker pool to buyer
+            IGradientMarketMakerPool(marketMakerPool).transferTokenToOrderbook(
+                sellOrder.token,
+                tokenAmount
+            );
+            IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
+        } else {
+            // For sell orders: transfer ETH from market maker pool to seller
+            IGradientMarketMakerPool(marketMakerPool).transferETHToOrderbook(
+                sellOrder.token,
+                sellerPayment
+            );
+            (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
+            require(success, "ETH transfer to seller failed");
+        }
+
+        // Distribute 70% of fees to market maker pool
+        uint256 feeForPool = (sellerFee * mmFeeDistributionPercentage) /
+            DIVISOR;
+        totalFeesCollected -= feeForPool;
+        if (feeForPool > 0) {
+            IGradientMarketMakerPool(marketMakerPool).receiveFeeDistribution{
+                value: feeForPool
+            }(sellOrder.token);
+            emit FeeDistributedToPool(
+                marketMakerPool,
+                sellOrder.token,
+                feeForPool,
+                sellerFee
+            );
+        }
+
+        // Update order states
+        buyOrder.filledAmount += actualFillAmount;
+        sellOrder.filledAmount += actualFillAmount;
+
+        // Update order statuses
+        if (buyOrder.filledAmount == buyOrder.amount) {
+            buyOrder.status = OrderStatus.Filled;
+            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.buyOrderId,
+                actualFillAmount,
+                buyOrder.amount - buyOrder.filledAmount
+            );
+        }
+
+        if (sellOrder.filledAmount == sellOrder.amount) {
+            sellOrder.status = OrderStatus.Filled;
+            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                _match.sellOrderId,
+                actualFillAmount,
+                sellOrder.amount - sellOrder.filledAmount
+            );
+        }
     }
 
-    /// @notice Emergency function to withdraw stuck tokens
-    function emergencyWithdraw(
-        address token,
-        address to,
-        uint256 amount
+    /// @notice Updates the MM fee distribution percentage
+    /// @param newPercentage New MM fee distribution percentage in basis points
+    /// @dev Only callable by contract owner
+    function updateMMFeeDistributionPercentage(
+        uint256 newPercentage
     ) external onlyOwner {
-        require(to != address(0), "Invalid recipient");
-        if (token == address(0)) {
-            require(
-                amount <= address(this).balance,
-                "Insufficient ETH balance"
+        require(newPercentage <= 10000, "Percentage too high");
+        uint256 oldPercentage = mmFeeDistributionPercentage;
+        mmFeeDistributionPercentage = newPercentage;
+        emit MMFeeDistributionPercentageUpdated(oldPercentage, newPercentage);
+    }
+
+    /// @notice Fulfills multiple orders through the market maker pool
+    /// @param orderIds Array of order IDs to fulfill
+    /// @param fillAmounts Array of fill amounts for each order
+    /// @dev Only whitelisted fulfillers can call this function
+    function fulfillOrdersWithMarketMaker(
+        uint256[] calldata orderIds,
+        uint256[] calldata fillAmounts
+    ) external nonReentrant onlyWhitelistedFulfiller {
+        require(orderIds.length > 0, "No orders to fulfill");
+        require(
+            orderIds.length == fillAmounts.length,
+            "Mismatched arrays length"
+        );
+
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            require(fillAmounts[i] > 0, "Fill amount must be greater than 0");
+            _fulfillOrderWithMarketMaker(orderIds[i], fillAmounts[i]);
+        }
+    }
+
+    /// @notice Internal function to fulfill a single order through the market maker pool
+    /// @param orderId ID of the order to fulfill
+    /// @param fillAmount Amount of tokens to fill
+    function _fulfillOrderWithMarketMaker(
+        uint256 orderId,
+        uint256 fillAmount
+    ) internal {
+        Order storage order = orders[orderId];
+
+        // Validate order
+        require(order.status == OrderStatus.Active, "Order not active");
+        require(!isOrderExpired(orderId), "Order expired");
+
+        // Get market maker pool address from registry
+        address marketMakerPool = gradientRegistry.marketMakerPool();
+        require(marketMakerPool != address(0), "Market maker pool not set");
+
+        // Calculate actual fill amount based on remaining amount
+        uint256 remainingAmount = order.amount - order.filledAmount;
+        uint256 actualFillAmount = fillAmount > remainingAmount
+            ? remainingAmount
+            : fillAmount;
+
+        require(actualFillAmount > 0, "No amount to fill");
+
+        // Calculate payment amount and fees
+        uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
+        uint256 fee = _collectFee(paymentAmount);
+        uint256 finalPayment = paymentAmount - fee;
+
+        if (order.orderType == OrderType.Buy) {
+            // For buy orders:
+            // 1. Transfer tokens from market maker pool to buyer
+            IGradientMarketMakerPool(marketMakerPool).transferTokenToOrderbook(
+                order.token,
+                actualFillAmount
             );
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
+            IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
+
+            // 2. Deposit buyer's ETH (minus fees) to market maker pool
+            IGradientMarketMakerPool(marketMakerPool).receiveETHFromOrderbook{
+                value: finalPayment
+            }(order.token, finalPayment);
         } else {
-            IERC20(token).safeTransfer(to, amount);
+            // For sell orders:
+            // 1. Transfer ETH from market maker pool to seller
+            IGradientMarketMakerPool(marketMakerPool).transferETHToOrderbook(
+                order.token,
+                finalPayment
+            );
+            (bool success, ) = order.owner.call{value: finalPayment}("");
+            require(success, "ETH transfer to seller failed");
+
+            // 2. Deposit seller's tokens to market maker pool
+            IGradientMarketMakerPool(marketMakerPool).receiveTokenFromOrderbook(
+                    order.token,
+                    actualFillAmount
+                );
+        }
+
+        // Distribute fees to market maker pool
+        uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
+        totalFeesCollected -= feeForPool;
+        if (feeForPool > 0) {
+            IGradientMarketMakerPool(marketMakerPool).receiveFeeDistribution{
+                value: feeForPool
+            }(order.token);
+            emit FeeDistributedToPool(
+                marketMakerPool,
+                order.token,
+                feeForPool,
+                fee
+            );
+        }
+
+        // Update order state
+        order.filledAmount += actualFillAmount;
+
+        // Update order status
+        if (order.filledAmount == order.amount) {
+            order.status = OrderStatus.Filled;
+            emit OrderFulfilled(orderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                orderId,
+                actualFillAmount,
+                order.amount - order.filledAmount
+            );
+        }
+
+        emit OrderFulfilledByMarketMaker(
+            orderId,
+            marketMakerPool,
+            actualFillAmount,
+            order.price
+        );
+    }
+
+    /// @notice Allows users to fulfill their own order via AMM
+    /// @param orderId ID of the order to fulfill
+    /// @param fillAmount Amount of tokens to fill
+    /// @dev Only the order owner can call this function
+    function fulfillOwnOrderWithAMM(
+        uint256 orderId,
+        uint256 fillAmount,
+        uint256 amountOutMin
+    ) external nonReentrant orderExists(orderId) onlyOrderOwner(orderId) {
+        require(fillAmount > 0, "Fill amount must be greater than 0");
+
+        // @todo: add AMM integration here
+
+        Order storage order = orders[orderId];
+        require(order.status == OrderStatus.Active, "Order not active");
+        require(!isOrderExpired(orderId), "Order expired");
+
+        // Calculate actual fill amount based on remaining amount
+        uint256 remainingAmount = order.amount - order.filledAmount;
+        uint256 actualFillAmount = fillAmount > remainingAmount
+            ? remainingAmount
+            : fillAmount;
+        require(actualFillAmount > 0, "No amount to fill");
+
+        // Mark the order as filled (user will handle the actual AMM swap externally)
+        order.filledAmount += actualFillAmount;
+
+        // Update order status
+        if (order.filledAmount == order.amount) {
+            order.status = OrderStatus.Filled;
+            emit OrderFulfilled(orderId, actualFillAmount);
+        } else {
+            emit OrderPartiallyFulfilled(
+                orderId,
+                actualFillAmount,
+                order.amount - order.filledAmount
+            );
+        }
+
+        // Return tokens/ETH to user for them to handle AMM swap
+        if (order.orderType == OrderType.Buy) {
+            // For buy orders: return the ETH that was locked
+            uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
+            uint256 fee = (paymentAmount * feePercentage) / DIVISOR;
+            uint256 refundAmount = paymentAmount + fee;
+
+            totalFeesCollected -= fee;
+            (bool success, ) = order.owner.call{value: refundAmount}("");
+            require(success, "ETH refund failed");
+        } else {
+            // For sell orders: return the tokens that were locked
+            IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
         }
     }
 }
