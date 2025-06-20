@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IGradientRegistry.sol";
 import "./interfaces/IGradientMarketMakerPool.sol";
+import "./interfaces/IUniswapV2Router.sol";
 
 /// @title GradientOrderbook
 /// @notice A decentralized orderbook for trading ERC20 tokens against ETH
@@ -1248,7 +1249,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     function fulfillOwnOrderWithAMM(
         uint256 orderId,
         uint256 fillAmount,
-        uint256 amountOutMin
+        uint256 amountOutMin,
+        address dexRouter
     ) external nonReentrant orderExists(orderId) onlyOrderOwner(orderId) {
         require(fillAmount > 0, "Fill amount must be greater than 0");
 
@@ -1265,8 +1267,61 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             : fillAmount;
         require(actualFillAmount > 0, "No amount to fill");
 
+        // Calculate payment amount and fees
+        uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
+        uint256 fee = _collectFee(paymentAmount);
+
         // Mark the order as filled (user will handle the actual AMM swap externally)
         order.filledAmount += actualFillAmount;
+
+        IUniswapV2Router02 router = IUniswapV2Router02(dexRouter);
+
+        // Prepare path
+        address[] memory path = new address[](2);
+        if (order.orderType == OrderType.Buy) {
+            path[0] = router.WETH(); // ETH
+            path[1] = order.token;
+        } else {
+            path[0] = order.token;
+            path[1] = router.WETH(); // ETH
+        }
+
+        // Execute trade
+        if (order.orderType == OrderType.Buy) {
+            // Buy tokens with ETH
+            router.swapExactETHForTokensSupportingFeeOnTransferTokens{
+                value: paymentAmount
+            }(
+                amountOutMin,
+                path,
+                order.owner,
+                block.timestamp + 300 // 5 minute deadline
+            );
+        } else {
+            // Sell tokens for ETH
+            IERC20(order.token).safeTransferFrom(
+                order.owner,
+                address(this),
+                actualFillAmount
+            );
+            IERC20(order.token).approve(dexRouter, actualFillAmount);
+
+            uint256 currentBalance = address(this).balance;
+            router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+                actualFillAmount,
+                amountOutMin,
+                path,
+                address(this),
+                block.timestamp + 300 // 5 minute deadline
+            );
+
+            uint256 newBalance = address(this).balance;
+            uint256 receivedAmount = newBalance - currentBalance;
+            uint256 amountAfterFee = receivedAmount - fee;
+
+            (bool success, ) = order.owner.call{value: amountAfterFee}("");
+            require(success, "ETH refund failed");
+        }
 
         // Update order status
         if (order.filledAmount == order.amount) {
@@ -1278,21 +1333,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 actualFillAmount,
                 order.amount - order.filledAmount
             );
-        }
-
-        // Return tokens/ETH to user for them to handle AMM swap
-        if (order.orderType == OrderType.Buy) {
-            // For buy orders: return the ETH that was locked
-            uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
-            uint256 fee = (paymentAmount * feePercentage) / DIVISOR;
-            uint256 refundAmount = paymentAmount + fee;
-
-            totalFeesCollected -= fee;
-            (bool success, ) = order.owner.call{value: refundAmount}("");
-            require(success, "ETH refund failed");
-        } else {
-            // For sell orders: return the tokens that were locked
-            IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
         }
     }
 }
