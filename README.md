@@ -37,6 +37,7 @@ This diagram illustrates the primary user flows and contract interactions within
 | External |       +-------------------------------------------+
 |   AMM    |       |         GradientMarketMakerPool         |
 +----------+       +-------------------------------------------+
+```
 
 Note: All core contracts use the GradientRegistry for service discovery (not shown for clarity).
 
