@@ -23,7 +23,6 @@ interface IGradientMarketMakerPool {
         uint256 accRewardPerShare;
         uint256 rewardBalance;
         address uniswapPair;
-        bool exists;
     }
 
     // Events
@@ -136,4 +135,23 @@ interface IGradientMarketMakerPool {
         address token,
         address user
     ) external view returns (uint256 lpShares);
+
+    /**
+     * @notice Get the Uniswap V2 pair address for a given token
+     * @param token Address of the token
+     * @return pairAddress Address of the Uniswap V2 pair
+     */
+    function getPairAddress(
+        address token
+    ) external view returns (address pairAddress);
+
+    /**
+     * @notice Get the reserves for a token pair
+     * @param token Address of the token
+     * @return reserveETH ETH reserve amount
+     * @return reserveToken Token reserve amount
+     */
+    function getReserves(
+        address token
+    ) external view returns (uint256 reserveETH, uint256 reserveToken);
 }

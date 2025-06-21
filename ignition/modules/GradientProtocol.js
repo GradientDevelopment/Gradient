@@ -1,4 +1,5 @@
 const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
+const { ROUTER_ADDRESSES } = require("../../config/addresses");
 
 module.exports = buildModule("GradientProtocol", (m) => {
     // 1. Deploy GradientRegistry first (central registry)
@@ -9,8 +10,10 @@ module.exports = buildModule("GradientProtocol", (m) => {
         gradientRegistry
     ], {});
 
-    // 3. Deploy FallbackExecutor (standalone)
-    const fallbackExecutor = m.contract("FallbackExecutor", [], {});
+    // 3. Deploy FallbackExecutor (depends on registry)
+    const fallbackExecutor = m.contract("FallbackExecutor", [
+        gradientRegistry
+    ], {});
 
     // 4. Deploy GradientOrderbook (depends on registry)
     const gradientOrderbook = m.contract("GradientOrderbook", [
@@ -23,7 +26,8 @@ module.exports = buildModule("GradientProtocol", (m) => {
         "0x0000000000000000000000000000000000000000", // gradientToken (placeholder)
         "0x0000000000000000000000000000000000000000", // feeCollector (placeholder)
         gradientOrderbook, // orderbook
-        fallbackExecutor // fallbackExecutor
+        fallbackExecutor, // fallbackExecutor
+        ROUTER_ADDRESSES.mainnet.uniswapV2Router // Uniswap V2 Router (mainnet)
     ]);
 
     // 6. Set up initial configurations
@@ -64,12 +68,12 @@ module.exports = buildModule("GradientProtocol", (m) => {
 
     // 11. Configure fallback executor
     // Add Uniswap V2 as a DEX (example addresses for mainnet)
-    // m.call(fallbackExecutor, "addDEX", [
-    //     "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D", // Uniswap V2 Router
-    //     "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D", // Router address
-    //     "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f", // Factory address
-    //     1 // Priority (1 = highest)
-    // ]);
+    m.call(fallbackExecutor, "addDEX", [
+        ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router
+        ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Router address
+        ROUTER_ADDRESSES.mainnet.uniswapV2Factory, // Factory address
+        1 // Priority (1 = highest)
+    ]);
 
     return {
         gradientRegistry,

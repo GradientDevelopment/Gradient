@@ -9,22 +9,9 @@ interface IFallbackExecutor {
         uint256 priority;
     }
 
-    struct TokenConfig {
-        bool isSupported;
-        uint256 minAmount;
-        uint256 maxAmount;
-        address[] preferredDEXes;
-    }
-
     // Events
     event DEXAdded(address indexed dex, address router, address factory);
     event DEXRemoved(address indexed dex);
-    event TokenAdded(
-        address indexed token,
-        uint256 minAmount,
-        uint256 maxAmount
-    );
-    event TokenRemoved(address indexed token);
     event TradeExecuted(
         address indexed token,
         address indexed dex,
@@ -47,17 +34,7 @@ interface IFallbackExecutor {
             uint256 priority
         );
 
-    function supportedTokens(
-        address token
-    )
-        external
-        view
-        returns (
-            bool isSupported,
-            uint256 minAmount,
-            uint256 maxAmount,
-            address[] memory preferredDEXes
-        );
+    function gradientRegistry() external view returns (address);
 
     // State changing functions
     function addDEX(
@@ -69,19 +46,10 @@ interface IFallbackExecutor {
 
     function removeDEX(address dex) external;
 
-    function addToken(
-        address token,
-        uint256 minAmount,
-        uint256 maxAmount,
-        address[] calldata preferredDEXes
-    ) external;
-
-    function removeToken(address token) external;
-
     function executeTrade(
         address token,
         uint256 amount,
         uint256 minAmountOut,
         bool isBuy
-    ) external returns (uint256 amountOut);
+    ) external payable returns (uint256 amountOut);
 }

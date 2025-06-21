@@ -8,6 +8,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IGradientRegistry.sol";
 import "./interfaces/IGradientMarketMakerPool.sol";
 import "./interfaces/IUniswapV2Pair.sol";
+import "./interfaces/IUniswapV2Router.sol";
+import "./interfaces/IUniswapV2Factory.sol";
 
 contract GradientMarketMakerPool is
     Ownable,
@@ -49,7 +51,9 @@ contract GradientMarketMakerPool is
     );
 
     modifier poolExists(address token) {
-        require(pools[token].uniswapPair != address(0), "Pool does not exist");
+        address pairAddress = getPairAddress(token);
+        require(pairAddress != address(0), "Pair does not exist");
+        require(pools[token].uniswapPair != address(0), "Pool not initialized");
         _;
     }
 
@@ -105,14 +109,8 @@ contract GradientMarketMakerPool is
     ) external payable nonReentrant {
         PoolInfo storage pool = pools[token];
 
-        // Check 50/50 ratio based on Uniswap reserves
-        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(
-            pool.uniswapPair
-        ).getReserves();
-        address token0 = IUniswapV2Pair(pool.uniswapPair).token0();
-        (uint256 reserveETH, uint256 reserveToken) = token0 == token
-            ? (reserve1, reserve0)
-            : (reserve0, reserve1);
+        // Get reserves from Uniswap pair
+        (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
         uint256 expectedTokens = (msg.value * reserveToken) / reserveETH;
         // Allow 1% slippage tolerance
         require(
@@ -471,5 +469,45 @@ contract GradientMarketMakerPool is
             pool.totalLiquidity,
             pool.totalLPShares
         );
+    }
+
+    /**
+     * @notice Get the Uniswap V2 pair address for a given token
+     * @param token Address of the token
+     * @return pairAddress Address of the Uniswap V2 pair
+     */
+    function getPairAddress(
+        address token
+    ) public view returns (address pairAddress) {
+        address routerAddress = gradientRegistry.router();
+        require(routerAddress != address(0), "Router not set");
+
+        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
+        address factory = router.factory();
+        address weth = router.WETH();
+
+        IUniswapV2Factory factoryContract = IUniswapV2Factory(factory);
+        return factoryContract.getPair(token, weth);
+    }
+
+    /**
+     * @notice Get the reserves for a token pair
+     * @param token Address of the token
+     * @return reserveETH ETH reserve amount
+     * @return reserveToken Token reserve amount
+     */
+    function getReserves(
+        address token
+    ) public view returns (uint256 reserveETH, uint256 reserveToken) {
+        address pairAddress = getPairAddress(token);
+        require(pairAddress != address(0), "Pair does not exist");
+
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
+            .getReserves();
+        address token0 = IUniswapV2Pair(pairAddress).token0();
+
+        (reserveETH, reserveToken) = token0 == token
+            ? (reserve1, reserve0)
+            : (reserve0, reserve1);
     }
 }

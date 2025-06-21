@@ -15,6 +15,7 @@ contract GradientRegistry is Ownable {
     address public feeCollector;
     address public orderbook;
     address public fallbackExecutor;
+    address public router; // Uniswap V2 Router address
 
     // Mapping for blocked tokens
     mapping(address => bool) public blockedTokens;
@@ -52,13 +53,15 @@ contract GradientRegistry is Ownable {
      * @param _feeCollector Address of the fee collector contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
+     * @param _router Address of the Uniswap V2 Router contract
      */
     function setMainContracts(
         address _marketMakerPool,
         address _gradientToken,
         address _feeCollector,
         address _orderbook,
-        address _fallbackExecutor
+        address _fallbackExecutor,
+        address _router
     ) external onlyOwner {
         emit ContractAddressUpdated(
             "MarketMakerPool",
@@ -81,12 +84,14 @@ contract GradientRegistry is Ownable {
             fallbackExecutor,
             _fallbackExecutor
         );
+        emit ContractAddressUpdated("Router", router, _router);
 
         marketMakerPool = _marketMakerPool;
         gradientToken = _gradientToken;
         feeCollector = _feeCollector;
         orderbook = _orderbook;
         fallbackExecutor = _fallbackExecutor;
+        router = _router;
     }
 
     /**
@@ -143,6 +148,9 @@ contract GradientRegistry is Ownable {
         } else if (nameHash == keccak256(bytes("FallbackExecutor"))) {
             oldAddress = fallbackExecutor;
             fallbackExecutor = newAddress;
+        } else if (nameHash == keccak256(bytes("Router"))) {
+            oldAddress = router;
+            router = newAddress;
         } else {
             revert("Invalid contract name");
         }
@@ -198,6 +206,7 @@ contract GradientRegistry is Ownable {
      * @return _feeCollector Address of the fee collector contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
+     * @return _router Address of the Uniswap V2 Router contract
      */
     function getAllMainContracts()
         external
@@ -207,7 +216,8 @@ contract GradientRegistry is Ownable {
             address _gradientToken,
             address _feeCollector,
             address _orderbook,
-            address _fallbackExecutor
+            address _fallbackExecutor,
+            address _router
         )
     {
         return (
@@ -215,7 +225,8 @@ contract GradientRegistry is Ownable {
             gradientToken,
             feeCollector,
             orderbook,
-            fallbackExecutor
+            fallbackExecutor,
+            router
         );
     }
 
@@ -241,6 +252,14 @@ contract GradientRegistry is Ownable {
      */
     function getFallbackExecutor() external view returns (address) {
         return fallbackExecutor;
+    }
+
+    /**
+     * @notice Get the router contract address
+     * @return address The router contract address
+     */
+    function getRouter() external view returns (address) {
+        return router;
     }
 
     /**
