@@ -109,6 +109,11 @@ contract GradientMarketMakerPool is
     ) external payable nonReentrant {
         PoolInfo storage pool = pools[token];
 
+        if (pool.uniswapPair == address(0)) {
+            pool.uniswapPair = getPairAddress(token);
+        }
+        require(pool.uniswapPair != address(0), "Pair does not exist");
+
         // Get reserves from Uniswap pair
         (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
         uint256 expectedTokens = (msg.value * reserveToken) / reserveETH;

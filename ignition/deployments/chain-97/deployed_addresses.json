@@ -2,5 +2,7 @@
   "GradientProtocolTestnet#GradientRegistry": "0x2951d1B0cC463933bEdFd7Cc2BFC4B8fc247f026",
   "GradientProtocolTestnet#FallbackExecutor": "0xF66dD2566Ce21CdFD05bA4C10E888B85A8c7d2c4",
   "GradientProtocolTestnet#GradientMarketMakerPool": "0x4Fc6Da5B83D751B46c3DAd788Ed89064f2d203F3",
-  "GradientProtocolTestnet#GradientOrderbook": "0x452F1a3c34D1a9cC3F66F05ebAC3ACe52Bb03cAd"
+  "GradientProtocolTestnet#GradientOrderbook": "0x452F1a3c34D1a9cC3F66F05ebAC3ACe52Bb03cAd",
+  "MarketMakerPool#GradientRegistry": "0x519959aC96953932f9eD5a598bAC591EbfAc8812",
+  "MarketMakerPool#GradientMarketMakerPool": "0x1E1789A075ef85FfEFb83A2BF40309b633EA2441"
 }
