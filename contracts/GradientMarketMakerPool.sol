@@ -100,12 +100,14 @@ contract GradientMarketMakerPool is
      * @notice Allows users to provide liquidity to a pool
      * @param token Address of the token to provide liquidity for
      * @param tokenAmount Amount of tokens to deposit
+     * @param minTokenAmount Minimum amount of tokens to accept (slippage protection)
      * @dev Requires ETH to be sent with the transaction in the correct ratio
      * @dev Calculates pending rewards before updating user's liquidity
      */
     function provideLiquidity(
         address token,
-        uint256 tokenAmount
+        uint256 tokenAmount,
+        uint256 minTokenAmount
     ) external payable nonReentrant {
         PoolInfo storage pool = pools[token];
 
@@ -116,8 +118,17 @@ contract GradientMarketMakerPool is
 
         // Get reserves from Uniswap pair
         (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
+        require(
+            reserveETH > 0 && reserveToken > 0,
+            "Insufficient liquidity in Uniswap pair"
+        );
+
         uint256 expectedTokens = (msg.value * reserveToken) / reserveETH;
-        // Allow 1% slippage tolerance
+
+        // Slippage protection - ensure user gets at least minTokenAmount
+        require(tokenAmount >= minTokenAmount, "Slippage too high");
+
+        // Allow 1% slippage tolerance for the ratio check
         require(
             tokenAmount >= (expectedTokens * 99) / 100 &&
                 tokenAmount <= (expectedTokens * 101) / 100,
@@ -218,9 +229,30 @@ contract GradientMarketMakerPool is
         pool.totalEth -= actualEthWithdraw;
         pool.totalLPShares -= lpSharesToBurn;
 
-        mm.rewardDebt =
-            ((mm.tokenAmount + mm.ethAmount) * pool.accRewardPerShare) /
-            SCALE;
+        // Check if this is a 100% withdrawal
+        bool isFullWithdrawal = (shares == 10000);
+
+        // If full withdrawal, send accumulated fees and reset values
+        if (isFullWithdrawal) {
+            uint256 totalRewards = mm.pendingReward;
+            if (totalRewards > 0) {
+                mm.pendingReward = 0;
+                mm.rewardDebt = 0;
+
+                // Send accumulated fees to user
+                (bool successFee, ) = payable(msg.sender).call{
+                    value: totalRewards
+                }("");
+                require(successFee, "Fee transfer failed");
+
+                emit RewardClaimed(msg.sender, totalRewards);
+            }
+        } else {
+            // For partial withdrawals, update reward debt normally
+            mm.rewardDebt =
+                ((mm.tokenAmount + mm.ethAmount) * pool.accRewardPerShare) /
+                SCALE;
+        }
 
         // Transfer tokens and ETH back to user
         IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
@@ -271,13 +303,53 @@ contract GradientMarketMakerPool is
     }
 
     /**
-     * @notice Emergency withdraw function
+     * @notice Emergency withdraw function for owner to withdraw all ETH and tokens
+     * @param tokens Array of token addresses to withdraw
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers assets
      */
-    function emergencyWithdraw() external onlyOwner {
+    function emergencyWithdraw(address[] calldata tokens) external onlyOwner {
+        // Withdraw all ETH
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            (bool success, ) = owner().call{value: ethBalance}("");
+            require(success, "ETH withdrawal failed");
+        }
+
+        // Withdraw all specified tokens
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token != address(0)) {
+                uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+                if (tokenBalance > 0) {
+                    IERC20(token).safeTransfer(owner(), tokenBalance);
+                }
+            }
+        }
+    }
+
+    /**
+     * @notice Emergency withdraw function for owner to withdraw all ETH
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers ETH
+     */
+    function emergencyWithdrawETH() external onlyOwner {
         uint256 balance = address(this).balance;
         if (balance > 0) {
             (bool success, ) = owner().call{value: balance}("");
-            require(success, "Withdrawal failed");
+            require(success, "ETH withdrawal failed");
         }
     }
 

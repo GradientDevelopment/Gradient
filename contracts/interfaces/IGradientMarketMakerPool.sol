@@ -88,10 +88,12 @@ interface IGradientMarketMakerPool {
      * @notice Allows users to provide liquidity to a pool
      * @param token Address of the token to provide liquidity for
      * @param tokenAmount Amount of tokens to deposit
+     * @param minTokenAmount Minimum amount of tokens to accept (slippage protection)
      */
     function provideLiquidity(
         address token,
-        uint256 tokenAmount
+        uint256 tokenAmount,
+        uint256 minTokenAmount
     ) external payable;
 
     /**

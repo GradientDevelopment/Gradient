@@ -840,22 +840,59 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         totalOrderCount[queueKey] += 1;
     }
 
-    /// @notice Emergency function to withdraw stuck tokens
+    /**
+     * @notice Emergency withdraw function for owner to withdraw all ETH and tokens
+     * @param tokens Array of token addresses to withdraw
+     * @param amounts Array of token amount to withdraw
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers assets
+     */
     function emergencyWithdraw(
-        address token,
-        address to,
-        uint256 amount
+        address[] calldata tokens,
+        uint256[] calldata amounts
     ) external onlyOwner {
-        require(to != address(0), "Invalid recipient");
-        if (token == address(0)) {
-            require(
-                amount <= address(this).balance,
-                "Insufficient ETH balance"
-            );
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
-        } else {
-            IERC20(token).safeTransfer(to, amount);
+        require(tokens.length == amounts.length, "Invalid length");
+        // Withdraw all ETH
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            (bool success, ) = owner().call{value: ethBalance}("");
+            require(success, "ETH withdrawal failed");
+        }
+
+        // Withdraw all specified tokens
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token != address(0)) {
+                if (amounts[i] > 0) {
+                    IERC20(token).safeTransfer(owner(), amounts[i]);
+                }
+            }
+        }
+    }
+
+    /**
+     * @notice Emergency withdraw function for owner to withdraw all ETH
+     * @param amount ETH amount to withdraw
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers ETH
+     */
+    function emergencyWithdrawETH(uint256 amount) external onlyOwner {
+        uint256 balance = address(this).balance;
+        if (amount <= balance) {
+            (bool success, ) = owner().call{value: amount}("");
+            require(success, "ETH withdrawal failed");
         }
     }
 
@@ -1085,9 +1122,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
             // 3. Deposit seller's tokens to market maker pool
             IGradientMarketMakerPool(marketMakerPool).receiveTokenFromOrderbook(
-                    order.token,
-                    actualFillAmount
-                );
+                order.token,
+                actualFillAmount
+            );
 
             // 4. Distribute fees to market maker pool
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;

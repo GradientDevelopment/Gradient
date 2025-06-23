@@ -1,33 +1,32 @@
 const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 
 module.exports = buildModule("MarketMakerPool", (m) => {
-    // Deploy GradientRegistry first (required dependency)
-    const gradientRegistry = m.contract("GradientRegistry", [], {});
+  // Deploy GradientRegistry first (required dependency)
+  // const gradientRegistry = m.contract("GradientRegistry", [], {});
 
-    // Deploy GradientMarketMakerPool with registry dependency
-    const gradientMarketMakerPool = m.contract("GradientMarketMakerPool", [
-        gradientRegistry
-    ], {});
+  // Deploy GradientMarketMakerPool with registry dependency
+  const gradientMarketMakerPool = m.contract(
+    "GradientMarketMakerPool",
+    ["0x893D41635725d8EA6F528D3f3F3DF3E9e8076934"],
+    {}
+  );
 
-    // Configure the registry with the market maker pool address
-    // m.call(gradientRegistry, "setMainContracts", [
-    //     gradientMarketMakerPool, // marketMakerPool
-    //     "0x0000000000000000000000000000000000000000", // gradientToken (placeholder)
-    //     "0x0000000000000000000000000000000000000000", // feeCollector (placeholder)
-    //     "0x0000000000000000000000000000000000000000", // orderbook (placeholder)
-    //     "0x0000000000000000000000000000000000000000", // fallbackExecutor (placeholder)
-    //     "0x0000000000000000000000000000000000000000"  // uniswapRouter (placeholder)
-    // ]);
+  // Configure the registry with the market maker pool address
+  // m.call(gradientRegistry, "setMainContracts", [
+  //     gradientMarketMakerPool, // marketMakerPool
+  //     "0x0000000000000000000000000000000000000000", // gradientToken (placeholder)
+  //     "0x0000000000000000000000000000000000000000", // feeCollector (placeholder)
+  //     "0x0000000000000000000000000000000000000000", // orderbook (placeholder)
+  //     "0x0000000000000000000000000000000000000000", // fallbackExecutor (placeholder)
+  //     "0x0000000000000000000000000000000000000000"  // uniswapRouter (placeholder)
+  // ]);
 
-    // Authorize deployer as fulfiller in registry
-    // const deployer = m.getAccount(0); // Automatically gets the first signer
-    // m.call(gradientRegistry, "authorizeFulfiller", [
-    //     deployer, // deployer address
-    //     true // authorized
-    // ]);
+  // Authorize deployer as fulfiller in registry
+  // const deployer = m.getAccount(0); // Automatically gets the first signer
+  // m.call(gradientRegistry, "authorizeFulfiller", [
+  //     deployer, // deployer address
+  //     true // authorized
+  // ]);
 
-    return {
-        gradientRegistry,
-        gradientMarketMakerPool
-    };
+  return { gradientMarketMakerPool };
 });

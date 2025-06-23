@@ -268,5 +268,56 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         }
     }
 
+    /**
+     * @notice Emergency withdraw function for owner to withdraw all ETH and tokens
+     * @param tokens Array of token addresses to withdraw
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers assets
+     */
+    function emergencyWithdraw(address[] calldata tokens) external onlyOwner {
+        // Withdraw all ETH
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            (bool success, ) = owner().call{value: ethBalance}("");
+            require(success, "ETH withdrawal failed");
+        }
+
+        // Withdraw all specified tokens
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token != address(0)) {
+                uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+                if (tokenBalance > 0) {
+                    IERC20(token).safeTransfer(owner(), tokenBalance);
+                }
+            }
+        }
+    }
+
+    /**
+     * @notice Emergency withdraw function for owner to withdraw all ETH
+     * @dev Only callable by contract owner
+     * @dev Use this function ONLY in emergency situations such as:
+     *      - Contract vulnerability or exploit detected
+     *      - Critical bug in liquidity management logic
+     *      - Migration to new contract version
+     *      - Recovery of stuck or locked funds
+     *      - Security incident requiring immediate asset protection
+     * @dev This function bypasses all normal withdrawal logic and directly transfers ETH
+     */
+    function emergencyWithdrawETH() external onlyOwner {
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool success, ) = owner().call{value: balance}("");
+            require(success, "ETH withdrawal failed");
+        }
+    }
+
     receive() external payable {}
 }

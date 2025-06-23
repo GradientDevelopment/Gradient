@@ -12,16 +12,16 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200
-      }
-    }
+        runs: 200,
+      },
+    },
   },
   networks: {
     hardhat: {
-      chainId: 31337
+      chainId: 31337,
     },
     mainnet: {
-      url: `https://eth-mainnet.g.alchemy.com/v2/${process.env.MAIN_ALCHEMY_KEY}`,
+      url: `https://snowy-convincing-frost.quiknode.pro/${process.env.QUICKNODE_API_KEY}/`,
       accounts: [privateKey],
       allowUnlimitedContractSize: true,
     },
@@ -39,7 +39,7 @@ module.exports = {
   etherscan: {
     apiKey: {
       mainnet: process.env.ETHERSCAN_API_KEY,
-      bscTestnet: process.env.BSCSCAN_API_KEY
-    }
+      bscTestnet: process.env.BSCSCAN_API_KEY,
+    },
   },
 };
