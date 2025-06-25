@@ -13,6 +13,8 @@ interface IGradientMarketMakerPool {
         uint256 lpShares;
         uint256 rewardDebt;
         uint256 pendingReward;
+        uint256 withdrawnEth;
+        uint256 withdrawnTokens;
     }
 
     struct PoolInfo {
@@ -20,6 +22,8 @@ interface IGradientMarketMakerPool {
         uint256 totalToken;
         uint256 totalLiquidity;
         uint256 totalLPShares;
+        uint256 accountedEth;
+        uint256 accountedToken;
         uint256 accRewardPerShare;
         uint256 rewardBalance;
         address uniswapPair;

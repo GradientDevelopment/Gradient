@@ -83,16 +83,30 @@ contract GradientMarketMakerPool is
     }
 
     /**
+     * @notice Receive ETH for reward distribution
+     */
+    receive() external payable {}
+
+    /**
      * @notice Updates pool rewards before modifying state
      * @param token Address of the token for the pool
      * @param ethAmount Amount of ETH to distribute as rewards
      */
     function _updatePool(address token, uint256 ethAmount) internal {
+        require(ethAmount > 0, "ETH amount must be greater than 0");
+        require(token != address(0), "Invalid token address");
         PoolInfo storage pool = pools[token];
 
         if (pool.totalLPShares == 0) return;
 
-        pool.accRewardPerShare += (ethAmount * SCALE) / pool.totalLPShares;
+        uint256 newAccRewardPerShare = pool.accRewardPerShare +
+            ((ethAmount * SCALE) / pool.totalLPShares);
+        require(
+            newAccRewardPerShare >= pool.accRewardPerShare,
+            "Overflow in reward calculation"
+        );
+
+        pool.accRewardPerShare = newAccRewardPerShare;
         pool.rewardBalance += ethAmount;
     }
 
@@ -142,7 +156,7 @@ contract GradientMarketMakerPool is
 
         // Calculate pending reward before update
         if (userLiquidity > 0) {
-            uint256 pending = (userLiquidity * pool.accRewardPerShare) /
+            uint256 pending = (mm.lpShares * pool.accRewardPerShare) /
                 SCALE -
                 mm.rewardDebt;
             mm.pendingReward += pending;
@@ -150,28 +164,29 @@ contract GradientMarketMakerPool is
 
         // Calculate LP shares to mint
         uint256 lpSharesToMint;
+        uint256 totalContribution = tokenAmount + msg.value;
+        uint256 totalAccounted = pool.accountedEth + pool.accountedToken;
         if (pool.totalLPShares == 0) {
             // First liquidity provider gets shares equal to their contribution
-            lpSharesToMint = tokenAmount + msg.value;
+            lpSharesToMint = totalContribution;
         } else {
             // Calculate shares based on proportional contribution
-            uint256 totalContribution = tokenAmount + msg.value;
             lpSharesToMint =
                 (totalContribution * pool.totalLPShares) /
-                pool.totalLiquidity;
+                totalAccounted;
         }
 
+        mm.lpShares += lpSharesToMint;
         mm.ethAmount += msg.value;
         mm.tokenAmount += tokenAmount;
-        mm.lpShares += lpSharesToMint;
-
-        mm.rewardDebt =
-            ((mm.tokenAmount + mm.ethAmount) * pool.accRewardPerShare) /
-            SCALE;
+        mm.rewardDebt = (mm.lpShares * pool.accRewardPerShare) / SCALE;
 
         pool.totalLiquidity += tokenAmount + msg.value;
         pool.totalEth += msg.value;
         pool.totalToken += tokenAmount;
+
+        pool.accountedEth += msg.value;
+        pool.accountedToken += tokenAmount;
         pool.totalLPShares += lpSharesToMint;
 
         emit LiquidityDeposited(
@@ -200,7 +215,7 @@ contract GradientMarketMakerPool is
         require(userLiquidity > 0, "No liquidity to withdraw");
 
         // Calculate pending rewards before withdrawing
-        uint256 pending = (userLiquidity * pool.accRewardPerShare) /
+        uint256 pending = (mm.lpShares * pool.accRewardPerShare) /
             SCALE -
             mm.rewardDebt;
         mm.pendingReward += pending;
@@ -215,44 +230,27 @@ contract GradientMarketMakerPool is
         uint256 actualEthWithdraw = (pool.totalEth * lpSharesToBurn) /
             pool.totalLPShares;
 
-        // Update user's recorded balances proportionally
-        uint256 userTokenReduction = (mm.tokenAmount * shares) / 10000;
-        uint256 userEthReduction = (mm.ethAmount * shares) / 10000;
-
         // Update balances
-        mm.tokenAmount -= userTokenReduction;
-        mm.ethAmount -= userEthReduction;
+        mm.withdrawnTokens += actualTokenWithdraw;
+        mm.withdrawnEth += actualEthWithdraw;
         mm.lpShares -= lpSharesToBurn;
 
-        pool.totalLiquidity -= actualTokenWithdraw + actualEthWithdraw;
+        pool.totalLiquidity -= (actualTokenWithdraw + actualEthWithdraw);
         pool.totalToken -= actualTokenWithdraw;
         pool.totalEth -= actualEthWithdraw;
+
+        // Calculate accounted values BEFORE reducing totalLPShares
+        uint256 accountedEthToRemove = (pool.accountedEth * lpSharesToBurn) /
+            pool.totalLPShares;
+        uint256 accountedTokenToRemove = (pool.accountedToken *
+            lpSharesToBurn) / pool.totalLPShares;
+
         pool.totalLPShares -= lpSharesToBurn;
+        pool.accountedEth -= accountedEthToRemove;
+        pool.accountedToken -= accountedTokenToRemove;
 
-        // Check if this is a 100% withdrawal
-        bool isFullWithdrawal = (shares == 10000);
-
-        // If full withdrawal, send accumulated fees and reset values
-        if (isFullWithdrawal) {
-            uint256 totalRewards = mm.pendingReward;
-            if (totalRewards > 0) {
-                mm.pendingReward = 0;
-                mm.rewardDebt = 0;
-
-                // Send accumulated fees to user
-                (bool successFee, ) = payable(msg.sender).call{
-                    value: totalRewards
-                }("");
-                require(successFee, "Fee transfer failed");
-
-                emit RewardClaimed(msg.sender, totalRewards);
-            }
-        } else {
-            // For partial withdrawals, update reward debt normally
-            mm.rewardDebt =
-                ((mm.tokenAmount + mm.ethAmount) * pool.accRewardPerShare) /
-                SCALE;
-        }
+        // Update reward debt for remaining shares
+        mm.rewardDebt = (mm.lpShares * pool.accRewardPerShare) / SCALE;
 
         // Transfer tokens and ETH back to user
         IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
@@ -287,7 +285,10 @@ contract GradientMarketMakerPool is
     function claimReward(address token) external nonReentrant {
         PoolInfo storage pool = pools[token];
         MarketMaker storage mm = marketMakers[token][msg.sender];
-        require(mm.lpShares > 0, "No liquidity");
+        require(
+            mm.lpShares > 0 || mm.pendingReward > 0,
+            "No liquidity or rewards"
+        );
 
         uint256 accumulated = (mm.lpShares * pool.accRewardPerShare) / SCALE;
         uint256 reward = accumulated - mm.rewardDebt + mm.pendingReward;
@@ -413,11 +414,6 @@ contract GradientMarketMakerPool is
     }
 
     /**
-     * @notice Receive ETH for reward distribution
-     */
-    receive() external payable {}
-
-    /**
      * @notice Transfer ETH to orderbook for order fulfillment
      * @param token The token being traded
      * @param amount The amount of ETH to transfer
@@ -428,11 +424,11 @@ contract GradientMarketMakerPool is
         uint256 amount
     ) external isNotBlocked(token) poolExists(token) onlyOrderbook {
         require(amount > 0, "Amount must be greater than 0");
-        require(amount <= address(this).balance, "Insufficient ETH balance");
-
+        require(token != address(0), "Invalid token address");
         // Update pool information
         PoolInfo storage pool = pools[token];
         require(pool.totalLiquidity > 0, "No liquidity");
+        require(pool.totalEth >= amount, "Insufficient pool ETH balance");
 
         // Update pool balances
         pool.totalEth -= amount;

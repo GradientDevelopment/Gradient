@@ -1,8 +1,7 @@
 {
-  "GradientProtocolTestnet#GradientRegistry": "0x2951d1B0cC463933bEdFd7Cc2BFC4B8fc247f026",
-  "GradientProtocolTestnet#FallbackExecutor": "0xF66dD2566Ce21CdFD05bA4C10E888B85A8c7d2c4",
-  "GradientProtocolTestnet#GradientMarketMakerPool": "0x4Fc6Da5B83D751B46c3DAd788Ed89064f2d203F3",
-  "GradientProtocolTestnet#GradientOrderbook": "0x452F1a3c34D1a9cC3F66F05ebAC3ACe52Bb03cAd",
-  "MarketMakerPool#GradientRegistry": "0x519959aC96953932f9eD5a598bAC591EbfAc8812",
-  "MarketMakerPool#GradientMarketMakerPool": "0x1E1789A075ef85FfEFb83A2BF40309b633EA2441"
+  "GradientProtocolTestnet#GradientRegistry": "0x54047176c4031A7Dce6289Bca64801ced83AB9C4",
+  "GradientProtocolTestnet#GradientMarketMakerPool": "0x08f6627B5303B22be58eab3e507359CCf022b5DF",
+  "GradientProtocolTestnet#FallbackExecutor": "0x806f7353bB2b54DEBF6F756A005688236f474AB0",
+  "GradientProtocolTestnet#GradientOrderbook": "0xdbDE217b8b958a94A479B091d27d0dE40B91f6c5",
+  "MarketMakerPool#GradientMarketMakerPool": "0xC4ca6234D40835c4f5FDE629481830C1BDb0319C"
 }

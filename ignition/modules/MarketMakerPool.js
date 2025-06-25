@@ -7,7 +7,7 @@ module.exports = buildModule("MarketMakerPool", (m) => {
   // Deploy GradientMarketMakerPool with registry dependency
   const gradientMarketMakerPool = m.contract(
     "GradientMarketMakerPool",
-    ["0x893D41635725d8EA6F528D3f3F3DF3E9e8076934"],
+    ["0x54047176c4031A7Dce6289Bca64801ced83AB9C4"],
     {}
   );
 
