@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "./interfaces/IGradientRegistry.sol";
-import "./interfaces/IGradientMarketMakerPool.sol";
-import "./interfaces/IUniswapV2Router.sol";
-import "./interfaces/IFallbackExecutor.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
+import {IGradientMarketMakerPool} from "./interfaces/IGradientMarketMakerPool.sol";
+import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
+import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
 
 /// @title GradientOrderbook
 /// @notice A decentralized orderbook for trading ERC20 tokens against ETH
@@ -696,104 +696,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice Internal function to fulfill limit orders through market maker (when both orders use market maker)
-    /// @param _match OrderMatch struct containing the match details
-    /// @dev This is used when both buy and sell orders are fulfilled through the market maker pool
-    function _fulfillLimitOrdersMarketMaker(OrderMatch memory _match) internal {
-        Order storage buyOrder = orders[_match.buyOrderId];
-        Order storage sellOrder = orders[_match.sellOrderId];
-
-        // Get market maker pool address from registry
-        address marketMakerPool = gradientRegistry.marketMakerPool();
-        require(marketMakerPool != address(0), "Market maker pool not set");
-
-        // Calculate actual fill amount based on remaining amounts
-        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
-        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
-        uint256 actualFillAmount = _match.fillAmount;
-
-        // Adjust fill amount if it exceeds either order's remaining amount
-        if (actualFillAmount > buyRemaining) {
-            actualFillAmount = buyRemaining;
-        }
-        if (actualFillAmount > sellRemaining) {
-            actualFillAmount = sellRemaining;
-        }
-
-        require(actualFillAmount > 0, "No amount to fill");
-
-        // Calculate token amounts and fees
-        uint256 tokenAmount = actualFillAmount;
-        uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18;
-
-        // Calculate and collect fees from seller party
-        uint256 sellerFee = _collectFee(paymentAmount);
-
-        // Calculate final amounts after fees
-        uint256 sellerPayment = paymentAmount - sellerFee;
-
-        // Execute transfers through market maker pool
-        if (buyOrder.orderType == OrderType.Buy) {
-            // For buy orders: transfer tokens from market maker pool to buyer
-            IGradientMarketMakerPool(marketMakerPool).transferTokenToOrderbook(
-                sellOrder.token,
-                tokenAmount
-            );
-            IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
-        } else {
-            // For sell orders: transfer ETH from market maker pool to seller
-            IGradientMarketMakerPool(marketMakerPool).transferETHToOrderbook(
-                sellOrder.token,
-                sellerPayment
-            );
-            (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
-            require(success, "ETH transfer to seller failed");
-        }
-
-        // Distribute 70% of fees to market maker pool
-        uint256 feeForPool = (sellerFee * mmFeeDistributionPercentage) /
-            DIVISOR;
-        totalFeesCollected -= feeForPool;
-        if (feeForPool > 0) {
-            IGradientMarketMakerPool(marketMakerPool).receiveFeeDistribution{
-                value: feeForPool
-            }(sellOrder.token);
-            emit FeeDistributedToPool(
-                marketMakerPool,
-                sellOrder.token,
-                feeForPool,
-                sellerFee
-            );
-        }
-
-        // Update order states
-        buyOrder.filledAmount += actualFillAmount;
-        sellOrder.filledAmount += actualFillAmount;
-
-        // Update order statuses
-        if (buyOrder.filledAmount == buyOrder.amount) {
-            buyOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.buyOrderId,
-                actualFillAmount,
-                buyOrder.amount - buyOrder.filledAmount
-            );
-        }
-
-        if (sellOrder.filledAmount == sellOrder.amount) {
-            sellOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.sellOrderId,
-                actualFillAmount,
-                sellOrder.amount - sellOrder.filledAmount
-            );
-        }
-    }
-
     /// @notice Retrieves detailed information about an order
     /// @param orderId ID of the order to query
     /// @return Order struct containing all order details
@@ -1081,25 +983,22 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
 
         if (order.orderType == OrderType.Buy) {
-            // For buy orders:
-            // 1. Transfer tokens from market maker pool to buyer
-            IGradientMarketMakerPool(marketMakerPool).transferTokenToOrderbook(
-                order.token,
-                actualFillAmount
-            );
-
-            // 2. Deposit buyer's ETH (minus fees) to market maker pool
-            IGradientMarketMakerPool(marketMakerPool).receiveETHFromOrderbook{
+            // For buy orders: orderbook sends ETH to market maker, receives tokens
+            // Execute buy order - Orderbook sends ETH, receives tokens
+            IGradientMarketMakerPool(marketMakerPool).executeBuyOrder{
                 value: paymentAmount
-            }(order.token, paymentAmount);
+            }(order.token, paymentAmount, actualFillAmount);
 
-            // 3. Distribute market maker fee from already collected fees
+            // Distribute market maker fee from already collected fees
             uint256 fee = (paymentAmount * feePercentage) / DIVISOR;
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
                 IGradientMarketMakerPool(marketMakerPool)
-                    .receiveFeeDistribution{value: feeForPool}(order.token);
+                    .receiveFeeDistribution{value: feeForPool}(
+                    order.token,
+                    false
+                ); // Distribute to token pool for buy orders
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
@@ -1109,29 +1008,26 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             }
             IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
         } else {
-            // For sell orders:
-            // 1. Transfer ETH from market maker pool to seller
-            IGradientMarketMakerPool(marketMakerPool).transferETHToOrderbook(
+            // Execute sell order - Orderbook sends tokens, receives ETH
+            IGradientMarketMakerPool(marketMakerPool).executeSellOrder(
                 order.token,
-                paymentAmount
-            );
-
-            // 2. Collect fee from ETH received
-            uint256 fee = _collectFee(paymentAmount);
-            uint256 finalPayment = paymentAmount - fee;
-
-            // 3. Deposit seller's tokens to market maker pool
-            IGradientMarketMakerPool(marketMakerPool).receiveTokenFromOrderbook(
-                order.token,
+                paymentAmount,
                 actualFillAmount
             );
 
-            // 4. Distribute fees to market maker pool
+            // Collect fee from ETH received
+            uint256 fee = _collectFee(paymentAmount);
+            uint256 finalPayment = paymentAmount - fee;
+
+            // Distribute fees to market maker pool
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
                 IGradientMarketMakerPool(marketMakerPool)
-                    .receiveFeeDistribution{value: feeForPool}(order.token);
+                    .receiveFeeDistribution{value: feeForPool}(
+                    order.token,
+                    true
+                ); // Distribute to ETH pool for sell orders
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
@@ -1140,7 +1036,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 );
             }
 
-            // 5. Transfer ETH to seller (minus fee)
+            // Transfer ETH to seller (minus fee)
             (bool success, ) = order.owner.call{value: finalPayment}("");
             require(success, "ETH transfer to seller failed");
         }
