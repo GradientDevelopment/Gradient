@@ -17,7 +17,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Registry contract for accessing other protocol contracts
-    IGradientRegistry public immutable gradientRegistry;
+    IGradientRegistry public gradientRegistry;
 
     /// @notice Types of orders that can be placed
     enum OrderType {
@@ -213,6 +213,21 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 oldFeePercentage = feePercentage;
         feePercentage = newFeePercentage;
         emit FeePercentageUpdated(oldFeePercentage, newFeePercentage);
+    }
+
+    /**
+     * @notice Sets the gradient registry address
+     * @param _gradientRegistry New gradient registry address
+     * @dev Only callable by the contract owner
+     */
+    function setGradientRegistry(
+        IGradientRegistry _gradientRegistry
+    ) external onlyOwner {
+        require(
+            address(_gradientRegistry) != address(0),
+            "Invalid gradient registry"
+        );
+        gradientRegistry = _gradientRegistry;
     }
 
     /// @notice Withdraws collected fees to the specified address
@@ -742,62 +757,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         totalOrderCount[queueKey] += 1;
     }
 
-    /**
-     * @notice Emergency withdraw function for owner to withdraw all ETH and tokens
-     * @param tokens Array of token addresses to withdraw
-     * @param amounts Array of token amount to withdraw
-     * @dev Only callable by contract owner
-     * @dev Use this function ONLY in emergency situations such as:
-     *      - Contract vulnerability or exploit detected
-     *      - Critical bug in liquidity management logic
-     *      - Migration to new contract version
-     *      - Recovery of stuck or locked funds
-     *      - Security incident requiring immediate asset protection
-     * @dev This function bypasses all normal withdrawal logic and directly transfers assets
-     */
-    function emergencyWithdraw(
-        address[] calldata tokens,
-        uint256[] calldata amounts
-    ) external onlyOwner {
-        require(tokens.length == amounts.length, "Invalid length");
-        // Withdraw all ETH
-        uint256 ethBalance = address(this).balance;
-        if (ethBalance > 0) {
-            (bool success, ) = owner().call{value: ethBalance}("");
-            require(success, "ETH withdrawal failed");
-        }
-
-        // Withdraw all specified tokens
-        for (uint256 i = 0; i < tokens.length; i++) {
-            address token = tokens[i];
-            if (token != address(0)) {
-                if (amounts[i] > 0) {
-                    IERC20(token).safeTransfer(owner(), amounts[i]);
-                }
-            }
-        }
-    }
-
-    /**
-     * @notice Emergency withdraw function for owner to withdraw all ETH
-     * @param amount ETH amount to withdraw
-     * @dev Only callable by contract owner
-     * @dev Use this function ONLY in emergency situations such as:
-     *      - Contract vulnerability or exploit detected
-     *      - Critical bug in liquidity management logic
-     *      - Migration to new contract version
-     *      - Recovery of stuck or locked funds
-     *      - Security incident requiring immediate asset protection
-     * @dev This function bypasses all normal withdrawal logic and directly transfers ETH
-     */
-    function emergencyWithdrawETH(uint256 amount) external onlyOwner {
-        uint256 balance = address(this).balance;
-        if (amount <= balance) {
-            (bool success, ) = owner().call{value: amount}("");
-            require(success, "ETH withdrawal failed");
-        }
-    }
-
     /// @notice Internal function to fulfill a matched pair of market orders
     /// @param _match OrderMatch struct containing the match details
     /// @param executionPrice The price at which the orders will be executed
@@ -994,11 +953,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPool(marketMakerPool)
-                    .receiveFeeDistribution{value: feeForPool}(
-                    order.token,
-                    false
-                ); // Distribute to token pool for buy orders
+                IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
+                    value: feeForPool
+                }(order.token, false); // Distribute to token pool for buy orders
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
@@ -1008,6 +965,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             }
             IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
         } else {
+            // Approve tokens to market maker pool
+            IERC20(order.token).approve(marketMakerPool, actualFillAmount);
+
             // Execute sell order - Orderbook sends tokens, receives ETH
             IGradientMarketMakerPool(marketMakerPool).executeSellOrder(
                 order.token,
@@ -1023,11 +983,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPool(marketMakerPool)
-                    .receiveFeeDistribution{value: feeForPool}(
-                    order.token,
-                    true
-                ); // Distribute to ETH pool for sell orders
+                IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
+                    value: feeForPool
+                }(order.token, true); // Distribute to ETH pool for sell orders
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
@@ -1079,7 +1037,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         Order storage order = orders[orderId];
         require(order.status == OrderStatus.Active, "Order not active");
-        require(!isOrderExpired(orderId), "Order expired");
 
         // Calculate actual fill amount based on remaining amount
         uint256 remainingAmount = order.amount - order.filledAmount;

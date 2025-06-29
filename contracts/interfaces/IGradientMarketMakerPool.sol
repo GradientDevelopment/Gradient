@@ -8,6 +8,7 @@ pragma solidity ^0.8.20;
 interface IGradientMarketMakerPool {
     // Structs for ETH Pool
     struct ETHPoolInfo {
+        uint256 accountedEth;
         uint256 totalETH;
         uint256 totalLPShares;
         uint256 accRewardPerShare;
@@ -28,6 +29,7 @@ interface IGradientMarketMakerPool {
 
     // Structs for Token Pool
     struct TokenPoolInfo {
+        uint256 accountedToken;
         uint256 totalTokens;
         uint256 totalLPShares;
         uint256 accRewardPerShare;
@@ -102,9 +104,25 @@ interface IGradientMarketMakerPool {
         uint256 ethAmount
     );
 
-    event RewardDeposited(address indexed from, uint256 amount);
-    event RewardClaimed(address indexed user, uint256 amount);
+    event PoolFeeDistributed(
+        address indexed from,
+        uint256 amount,
+        address token,
+        bool isETH
+    );
+    event PoolFeeClaimed(
+        address indexed user,
+        uint256 amount,
+        address token,
+        bool isETH
+    );
 
+    event PoolSharesClaimed(
+        address indexed user,
+        uint256 amount,
+        address token,
+        bool isETH
+    );
     event PoolBalanceUpdated(
         address indexed token,
         uint256 newTotalEth,
@@ -137,6 +155,15 @@ interface IGradientMarketMakerPool {
         uint256 amount
     );
 
+    event MinLiquidityUpdated(uint256 newMinLiquidity);
+    event MinTokenLiquidityUpdated(uint256 newMinTokenLiquidity);
+    event ExcessiveFundsWithdrawn(
+        address indexed owner,
+        address indexed token,
+        uint256 amount,
+        string reason
+    );
+
     /**
      * @notice Add ETH liquidity to the pool
      * @param token Address of the token to provide ETH liquidity for
@@ -154,15 +181,25 @@ interface IGradientMarketMakerPool {
      * @notice Remove ETH liquidity from the pool
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minTokenAmount Minimum amount of tokens to receive
      */
-    function removeETHLiquidity(address token, uint256 shares) external;
+    function removeETHLiquidity(
+        address token,
+        uint256 shares,
+        uint256 minTokenAmount
+    ) external;
 
     /**
      * @notice Remove token liquidity from the pool
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minTokenAmount Minimum amount of tokens to receive
      */
-    function removeTokenLiquidity(address token, uint256 shares) external;
+    function removeTokenLiquidity(
+        address token,
+        uint256 shares,
+        uint256 minTokenAmount
+    ) external;
 
     /**
      * @notice Execute buy order - Orderbook sends ETH, receives tokens
@@ -189,69 +226,23 @@ interface IGradientMarketMakerPool {
     ) external;
 
     /**
-     * @notice Transfer ETH to orderbook for order fulfillment
-     * @param token The token being traded
-     * @param amount The amount of ETH to transfer
-     */
-    function transferETHToOrderbook(address token, uint256 amount) external;
-
-    /**
-     * @notice Transfer tokens to orderbook for order fulfillment
-     * @param token The token to transfer
-     * @param amount The amount of tokens to transfer
-     */
-    function transferTokenToOrderbook(address token, uint256 amount) external;
-
-    /**
-     * @notice Receive ETH deposit from orderbook for order fulfillment
-     * @param token The token being traded
-     * @param amount The amount of ETH to deposit
-     */
-    function receiveETHFromOrderbook(
-        address token,
-        uint256 amount
-    ) external payable;
-
-    /**
-     * @notice Receive token deposit from orderbook for order fulfillment
-     * @param token The token to deposit
-     * @param amount The amount of tokens to deposit
-     */
-    function receiveTokenFromOrderbook(address token, uint256 amount) external;
-
-    /**
-     * @notice Receives fee distribution from orderbook to be distributed to market makers
+     * @notice Distributes fee distribution from orderbook to be distributed to market makers
      * @param token Address of the token pool to distribute fees for
      * @param isETHPool Whether to distribute to ETH pool (true) or token pool (false)
      */
-    function receiveFeeDistribution(
-        address token,
-        bool isETHPool
-    ) external payable;
+    function distributePoolFee(address token, bool isETHPool) external payable;
 
     /**
      * @notice Claim ETH rewards for ETH providers
      * @param token Address of the token pool to claim rewards from
      */
-    function claimETHRewards(address token) external;
+    function claimEthPoolFee(address token) external;
 
     /**
      * @notice Claim token rewards for token providers
      * @param token Address of the token pool to claim rewards from
      */
-    function claimTokenRewards(address token) external;
-
-    /**
-     * @notice Claim token rewards for ETH providers
-     * @param token Address of the token pool to claim rewards from
-     */
-    function claimETHTokenRewards(address token) external;
-
-    /**
-     * @notice Claim ETH rewards for token providers
-     * @param token Address of the token pool to claim rewards from
-     */
-    function claimTokenETHRewards(address token) external;
+    function claimTokenPoolFee(address token) external;
 
     /**
      * @notice Gets ETH pool information for a specific token

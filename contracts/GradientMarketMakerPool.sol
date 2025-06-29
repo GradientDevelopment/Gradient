@@ -30,6 +30,17 @@ contract GradientMarketMakerPool is
 
     uint256 public constant SCALE = 1e18;
 
+    // Configurable minimum liquidity requirements
+    uint256 public minLiquidity = 1e15; // 0.001 ETH minimum (default)
+    uint256 public minTokenLiquidity = 1e15; // 0.001 tokens minimum (default)
+
+    // Track overall totals across all pools
+    uint256 public totalEthAdded; // Total ETH added across all pools
+    uint256 public totalEthRemoved; // Total ETH removed across all pools
+
+    mapping(address => uint256) public totalTokensAdded; // Total tokens added across all pools (per token)
+    mapping(address => uint256) public totalTokensRemoved; // Total tokens removed across all pools (per token)
+
     modifier isNotBlocked(address token) {
         require(!gradientRegistry.blockedTokens(token), "Token is blocked");
         _;
@@ -59,6 +70,34 @@ contract GradientMarketMakerPool is
      * @notice Receive ETH for reward distribution
      */
     receive() external payable {}
+
+    /**
+     * @notice Calculate LP shares using a more secure formula to prevent precision loss
+     * @param amount Amount being deposited
+     * @param totalAmount Total amount in pool
+     * @param totalShares Total shares in pool
+     * @return sharesToMint Number of shares to mint
+     */
+    function _calculateLPShares(
+        uint256 amount,
+        uint256 totalAmount,
+        uint256 totalShares
+    ) internal pure returns (uint256 sharesToMint) {
+        require(amount > 0, "Amount must be greater than 0");
+
+        if (totalShares == 0) {
+            // First liquidity provider gets shares equal to their contribution
+            return amount;
+        }
+
+        // Calculate shares proportionally
+        sharesToMint = (amount * totalShares) / totalAmount;
+
+        // Ensure minimum share requirement to prevent dust attacks
+        require(sharesToMint > 0, "Insufficient shares to mint");
+
+        return sharesToMint;
+    }
 
     /**
      * @notice Updates ETH pool rewards before modifying state
@@ -159,16 +198,42 @@ contract GradientMarketMakerPool is
     }
 
     /**
+     * @notice Add liquidity to the pool
+     * @param token Address of the token to provide liquidity for
+     * @param tokenAmount Amount of tokens to deposit
+     */
+    function addLiquidity(
+        address token,
+        uint256 tokenAmount
+    ) external payable isNotBlocked(token) nonReentrant {
+        require(msg.value >= minLiquidity, "ETH amount below minimum");
+        require(tokenAmount >= minTokenLiquidity, "Token amount below minimum");
+        require(token != address(0), "Invalid token address");
+
+        _addETHLiquidity(token, msg.value);
+        _addTokenLiquidity(token, tokenAmount);
+    }
+
+    /**
      * @notice Add ETH liquidity to the pool
      * @param token Address of the token to provide ETH liquidity for
      * @dev Requires ETH to be sent with the transaction
      */
     function addETHLiquidity(
         address token
-    ) external payable isNotBlocked(token) nonReentrant {
-        require(msg.value > 0, "Must provide ETH");
+    ) public payable isNotBlocked(token) nonReentrant {
+        require(msg.value >= minLiquidity, "ETH amount below minimum");
         require(token != address(0), "Invalid token address");
 
+        _addETHLiquidity(token, msg.value);
+    }
+
+    /**
+     * @notice Add ETH liquidity to the pool
+     * @param token Address of the token to provide ETH liquidity for
+     * @param ethAmount Amount of ETH to deposit
+     */
+    function _addETHLiquidity(address token, uint256 ethAmount) internal {
         ETHPoolInfo storage pool = ethPools[token];
 
         if (pool.uniswapPair == address(0)) {
@@ -194,17 +259,14 @@ contract GradientMarketMakerPool is
         }
 
         // Calculate LP shares to mint
-        uint256 lpSharesToMint;
-        if (pool.totalLPShares == 0) {
-            // First ETH provider gets shares equal to their contribution
-            lpSharesToMint = msg.value;
-        } else {
-            // Calculate shares based on proportional contribution
-            lpSharesToMint = (msg.value * pool.totalLPShares) / pool.totalETH;
-        }
+        uint256 lpSharesToMint = _calculateLPShares(
+            ethAmount,
+            pool.accountedEth,
+            pool.totalLPShares
+        );
 
         provider.lpShares += lpSharesToMint;
-        provider.ethAmount += msg.value;
+        provider.ethAmount += ethAmount;
         provider.rewardDebt =
             (provider.lpShares * pool.accRewardPerShare) /
             SCALE;
@@ -212,13 +274,17 @@ contract GradientMarketMakerPool is
             (provider.lpShares * pool.accTokenRewardPerShare) /
             SCALE;
 
-        pool.totalETH += msg.value;
+        pool.totalETH += ethAmount;
+        pool.accountedEth += ethAmount;
         pool.totalLPShares += lpSharesToMint;
+
+        // Track total ETH added by LPs
+        totalEthAdded += ethAmount;
 
         emit ETHLiquidityDeposited(
             msg.sender,
             token,
-            msg.value,
+            ethAmount,
             lpSharesToMint
         );
     }
@@ -231,10 +297,19 @@ contract GradientMarketMakerPool is
     function addTokenLiquidity(
         address token,
         uint256 tokenAmount
-    ) external isNotBlocked(token) nonReentrant {
-        require(tokenAmount > 0, "Must provide tokens");
+    ) public isNotBlocked(token) nonReentrant {
+        require(tokenAmount >= minTokenLiquidity, "Token amount below minimum");
         require(token != address(0), "Invalid token address");
 
+        _addTokenLiquidity(token, tokenAmount);
+    }
+
+    /**
+     * @notice Add token liquidity to the pool
+     * @param token Address of the token to provide liquidity for
+     * @param tokenAmount Amount of tokens to deposit
+     */
+    function _addTokenLiquidity(address token, uint256 tokenAmount) internal {
         TokenPoolInfo storage pool = tokenPools[token];
 
         if (pool.uniswapPair == address(0)) {
@@ -261,16 +336,11 @@ contract GradientMarketMakerPool is
         }
 
         // Calculate LP shares to mint
-        uint256 lpSharesToMint;
-        if (pool.totalLPShares == 0) {
-            // First token provider gets shares equal to their contribution
-            lpSharesToMint = tokenAmount;
-        } else {
-            // Calculate shares based on proportional contribution
-            lpSharesToMint =
-                (tokenAmount * pool.totalLPShares) /
-                pool.totalTokens;
-        }
+        uint256 lpSharesToMint = _calculateLPShares(
+            tokenAmount,
+            pool.accountedToken,
+            pool.totalLPShares
+        );
 
         provider.lpShares += lpSharesToMint;
         provider.tokenAmount += tokenAmount;
@@ -282,7 +352,11 @@ contract GradientMarketMakerPool is
             SCALE;
 
         pool.totalTokens += tokenAmount;
+        pool.accountedToken += tokenAmount;
         pool.totalLPShares += lpSharesToMint;
+
+        // Track total tokens added by LPs
+        totalTokensAdded[token] += tokenAmount;
 
         // Transfer tokens from user
         IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmount);
@@ -296,20 +370,56 @@ contract GradientMarketMakerPool is
     }
 
     /**
+     * @notice Remove liquidity from the pool
+     * @param token Address of the token to withdraw from
+     * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minEthAmount Minimum amount of ETH to receive
+     * @param minTokenAmount Minimum amount of tokens to receive
+     */
+    function removeLiquidity(
+        address token,
+        uint256 shares,
+        uint256 minEthAmount,
+        uint256 minTokenAmount
+    ) external isNotBlocked(token) nonReentrant {
+        require(shares > 0 && shares <= 10000, "Invalid shares percentage");
+        require(token != address(0), "Invalid token address");
+
+        _removeETHLiquidity(token, shares, minEthAmount);
+        _removeTokenLiquidity(token, shares, minTokenAmount);
+    }
+
+    /**
      * @notice Remove ETH liquidity from the pool
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minEthAmount Minimum amount of ETH to receive
      */
     function removeETHLiquidity(
         address token,
-        uint256 shares
-    ) external nonReentrant {
+        uint256 shares,
+        uint256 minEthAmount
+    ) external isNotBlocked(token) nonReentrant {
         require(shares > 0 && shares <= 10000, "Invalid shares percentage");
+        require(token != address(0), "Invalid token address");
+        _removeETHLiquidity(token, shares, minEthAmount);
+    }
 
+    /**
+     * @notice Remove ETH liquidity from the pool
+     * @param token Address of the token to withdraw from
+     * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minEthAmount Minimum amount of ETH to receive
+     */
+    function _removeETHLiquidity(
+        address token,
+        uint256 shares,
+        uint256 minEthAmount
+    ) internal {
         ETHPoolInfo storage pool = ethPools[token];
         ETHProvider storage provider = ethProviders[token][msg.sender];
 
-        require(pool.totalETH > 0, "No ETH liquidity in pool");
+        require(pool.totalLPShares > 0, "No ETH liquidity in pool");
         require(provider.ethAmount > 0, "No ETH liquidity to withdraw");
 
         // Calculate pending ETH rewards before withdrawing
@@ -328,17 +438,30 @@ contract GradientMarketMakerPool is
         // Calculate LP shares to burn based on withdrawal percentage
         uint256 lpSharesToBurn = (provider.lpShares * shares) / 10000;
         require(lpSharesToBurn > 0, "No shares to burn");
+        require(
+            lpSharesToBurn <= provider.lpShares,
+            "Insufficient shares to burn"
+        );
 
         // Calculate actual withdrawal amounts based on LP shares
-        uint256 actualEthWithdraw = (pool.totalETH * lpSharesToBurn) /
-            pool.totalLPShares;
+        uint256 actualEthWithdraw = _calculateWithdrawalAmount(
+            lpSharesToBurn,
+            pool.totalETH,
+            pool.totalLPShares
+        );
+        require(actualEthWithdraw <= pool.totalETH, "Insufficient ETH in pool");
 
         // Update balances
         provider.ethAmount -= actualEthWithdraw;
         provider.lpShares -= lpSharesToBurn;
 
+        // Calculate accounted values BEFORE reducing totalLPShares
+        uint256 accountedEthToRemove = (pool.accountedEth * lpSharesToBurn) /
+            pool.totalLPShares;
+
         pool.totalETH -= actualEthWithdraw;
         pool.totalLPShares -= lpSharesToBurn;
+        pool.accountedEth -= accountedEthToRemove;
 
         // Update reward debt for remaining shares
         provider.rewardDebt =
@@ -349,6 +472,10 @@ contract GradientMarketMakerPool is
             SCALE;
 
         // Transfer ETH back to user
+        require(
+            actualEthWithdraw >= minEthAmount,
+            "Insufficient ETH withdrawn"
+        );
         (bool success, ) = payable(msg.sender).call{value: actualEthWithdraw}(
             ""
         );
@@ -359,7 +486,12 @@ contract GradientMarketMakerPool is
             uint256 tokenRewards = provider.pendingTokenReward;
             provider.pendingTokenReward = 0;
             IERC20(token).safeTransfer(msg.sender, tokenRewards);
+
+            emit PoolSharesClaimed(msg.sender, tokenRewards, token, false);
         }
+
+        // Track total ETH removed by LPs
+        totalEthRemoved += actualEthWithdraw;
 
         emit ETHLiquidityWithdrawn(
             msg.sender,
@@ -373,17 +505,28 @@ contract GradientMarketMakerPool is
      * @notice Remove token liquidity from the pool
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minTokenAmount Minimum amount of tokens to receive
      */
     function removeTokenLiquidity(
         address token,
-        uint256 shares
-    ) external nonReentrant {
+        uint256 shares,
+        uint256 minTokenAmount
+    ) external isNotBlocked(token) nonReentrant {
         require(shares > 0 && shares <= 10000, "Invalid shares percentage");
+        require(token != address(0), "Invalid token address");
 
+        _removeTokenLiquidity(token, shares, minTokenAmount);
+    }
+
+    function _removeTokenLiquidity(
+        address token,
+        uint256 shares,
+        uint256 minTokenAmount
+    ) internal {
         TokenPoolInfo storage pool = tokenPools[token];
         TokenProvider storage provider = tokenProviders[token][msg.sender];
 
-        require(pool.totalTokens > 0, "No token liquidity in pool");
+        require(pool.totalLPShares > 0, "No token liquidity in pool");
         require(provider.tokenAmount > 0, "No token liquidity to withdraw");
 
         // Calculate pending token rewards before withdrawing
@@ -398,20 +541,37 @@ contract GradientMarketMakerPool is
             provider.ethRewardDebt;
         provider.pendingETHReward += pendingEth;
 
-        // Calculate LP shares to burn based on withdrawal percentage
-        uint256 lpSharesToBurn = (provider.lpShares * shares) / 10000;
+        uint256 lpSharesToBurn;
+
+        lpSharesToBurn = (provider.lpShares * shares) / 10000;
         require(lpSharesToBurn > 0, "No shares to burn");
+        require(
+            lpSharesToBurn <= provider.lpShares,
+            "Insufficient shares to burn"
+        );
 
         // Calculate actual withdrawal amounts based on LP shares
-        uint256 actualTokenWithdraw = (pool.totalTokens * lpSharesToBurn) /
-            pool.totalLPShares;
+        uint256 actualTokenWithdraw = _calculateWithdrawalAmount(
+            lpSharesToBurn,
+            pool.totalTokens,
+            pool.totalLPShares
+        );
+        require(
+            actualTokenWithdraw <= pool.totalTokens,
+            "Insufficient tokens in pool"
+        );
 
         // Update balances
         provider.tokenAmount -= actualTokenWithdraw;
         provider.lpShares -= lpSharesToBurn;
 
+        // Calculate accounted values BEFORE reducing totalLPShares
+        uint256 accountedTokenToRemove = (pool.accountedToken *
+            lpSharesToBurn) / pool.totalLPShares;
+
         pool.totalTokens -= actualTokenWithdraw;
         pool.totalLPShares -= lpSharesToBurn;
+        pool.accountedToken -= accountedTokenToRemove;
 
         // Update reward debt for remaining shares
         provider.rewardDebt =
@@ -422,6 +582,10 @@ contract GradientMarketMakerPool is
             SCALE;
 
         // Transfer tokens back to user
+        require(
+            actualTokenWithdraw >= minTokenAmount,
+            "Insufficient token withdrawn"
+        );
         IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
 
         // Transfer accumulated ETH rewards to user
@@ -430,7 +594,12 @@ contract GradientMarketMakerPool is
             provider.pendingETHReward = 0;
             (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
             require(success, "ETH reward transfer failed");
+
+            emit PoolSharesClaimed(msg.sender, ethRewards, token, true);
         }
+
+        // Track total tokens removed by LPs
+        totalTokensRemoved[token] += actualTokenWithdraw;
 
         emit TokenLiquidityWithdrawn(
             msg.sender,
@@ -464,7 +633,7 @@ contract GradientMarketMakerPool is
 
         // Token pool provides tokens to orderbook
         tokenPool.totalTokens -= tokenAmount;
-
+        totalTokensRemoved[token] += tokenAmount;
         // Token pool receives ETH rewards for providing tokens
         _updateTokenPoolETHRewards(token, ethAmount);
 
@@ -503,6 +672,7 @@ contract GradientMarketMakerPool is
 
         // ETH pool provides ETH to orderbook
         ethPool.totalETH -= ethAmount;
+        totalEthRemoved += ethAmount;
 
         // ETH pool receives token rewards for providing ETH
         _updateETHPoolTokenRewards(token, tokenAmount);
@@ -520,151 +690,10 @@ contract GradientMarketMakerPool is
         );
     }
 
-    /**
-     * @notice Transfer ETH to orderbook for order fulfillment (for buy orders)
-     * @param token The token being traded
-     * @param amount The amount of ETH to transfer
-     * @dev Only callable by the orderbook contract
-     * @dev ETH pool provides ETH, token pool receives rewards
-     */
-    function transferETHToOrderbook(
-        address token,
-        uint256 amount
-    ) external isNotBlocked(token) onlyOrderbook {
-        require(amount > 0, "Amount must be greater than 0");
-        require(token != address(0), "Invalid token address");
-
-        ETHPoolInfo storage ethPool = ethPools[token];
-        require(ethPool.totalETH >= amount, "Insufficient ETH liquidity");
-
-        // Update ETH pool balances
-        ethPool.totalETH -= amount;
-
-        // Transfer ETH to orderbook
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        require(success, "ETH transfer to orderbook failed");
-
-        emit PoolBalanceUpdated(
-            token,
-            ethPool.totalETH,
-            tokenPools[token].totalTokens,
-            ethPool.totalLPShares,
-            tokenPools[token].totalLPShares
-        );
-    }
-
-    /**
-     * @notice Transfer tokens to orderbook for order fulfillment (for sell orders)
-     * @param token The token to transfer
-     * @param amount The amount of tokens to transfer
-     * @dev Only callable by the orderbook contract
-     * @dev Token pool provides tokens, ETH pool receives rewards
-     */
-    function transferTokenToOrderbook(
-        address token,
-        uint256 amount
-    ) external isNotBlocked(token) onlyOrderbook {
-        require(amount > 0, "Amount must be greater than 0");
-        require(token != address(0), "Invalid token address");
-
-        TokenPoolInfo storage tokenPool = tokenPools[token];
-        require(
-            tokenPool.totalTokens >= amount,
-            "Insufficient token liquidity"
-        );
-
-        // Update token pool balances
-        tokenPool.totalTokens -= amount;
-
-        // Transfer tokens to orderbook
-        IERC20(token).safeTransfer(msg.sender, amount);
-
-        emit PoolBalanceUpdated(
-            token,
-            ethPools[token].totalETH,
-            tokenPool.totalTokens,
-            ethPools[token].totalLPShares,
-            tokenPool.totalLPShares
-        );
-    }
-
-    /**
-     * @notice Receive ETH deposit from orderbook for order fulfillment
-     * @param token The token being traded
-     * @param amount The amount of ETH to deposit
-     * @dev Only callable by the orderbook contract
-     * @dev For buy orders: ETH goes to token pool as rewards
-     * @dev For sell orders: ETH goes to ETH pool as replenishment
-     */
-    function receiveETHFromOrderbook(
-        address token,
-        uint256 amount
-    ) external payable isNotBlocked(token) onlyOrderbook {
-        require(amount > 0, "Amount must be greater than 0");
-        require(msg.value == amount, "ETH amount mismatch");
-
-        // For buy orders: ETH should go to token pool as rewards
-        // For sell orders: ETH should go to ETH pool as replenishment
-        // We'll let the orderbook specify which pool should receive it
-        // For now, we'll add it to ETH pool as replenishment
-
-        ETHPoolInfo storage ethPool = ethPools[token];
-
-        // Update ETH pool balances
-        ethPool.totalETH += amount;
-
-        emit ETHReceivedFromOrderbook(msg.sender, amount, token);
-        emit PoolBalanceUpdated(
-            token,
-            ethPool.totalETH,
-            tokenPools[token].totalTokens,
-            ethPool.totalLPShares,
-            tokenPools[token].totalLPShares
-        );
-    }
-
-    /**
-     * @notice Receive token deposit from orderbook for order fulfillment
-     * @param token The token to deposit
-     * @param amount The amount of tokens to deposit
-     * @dev Only callable by the orderbook contract
-     * @dev For buy orders: tokens go to ETH pool as rewards
-     * @dev For sell orders: tokens go to token pool as replenishment
-     */
-    function receiveTokenFromOrderbook(
-        address token,
-        uint256 amount
-    ) external isNotBlocked(token) onlyOrderbook {
-        require(amount > 0, "Amount must be greater than 0");
-        require(token != address(0), "Invalid token address");
-
-        // For buy orders: tokens should go to ETH pool as rewards
-        // For sell orders: tokens should go to token pool as replenishment
-        // We'll let the orderbook specify which pool should receive it
-        // For now, we'll add it to token pool as replenishment
-
-        TokenPoolInfo storage tokenPool = tokenPools[token];
-
-        // Transfer tokens from orderbook to token pool
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-
-        // Update token pool balances
-        tokenPool.totalTokens += amount;
-
-        emit TokenReceivedFromOrderbook(msg.sender, token, amount);
-        emit PoolBalanceUpdated(
-            token,
-            ethPools[token].totalETH,
-            tokenPool.totalTokens,
-            ethPools[token].totalLPShares,
-            tokenPool.totalLPShares
-        );
-    }
-
-    /// @notice Receives fee distribution from orderbook to be distributed to market makers
+    /// @notice Distributes fee distribution from orderbook to be distributed to market makers
     /// @param token Address of the token pool to distribute fees for
     /// @param isETHPool Whether to distribute to ETH pool (true) or token pool (false)
-    function receiveFeeDistribution(
+    function distributePoolFee(
         address token,
         bool isETHPool
     ) external payable onlyRewardDistributor {
@@ -680,12 +709,12 @@ contract GradientMarketMakerPool is
             _updateTokenPool(token, msg.value);
         }
 
-        emit RewardDeposited(token, msg.value);
+        emit PoolFeeDistributed(msg.sender, msg.value, token, isETHPool);
     }
 
     /// @notice Claim ETH rewards for ETH providers
     /// @param token Address of the token pool to claim rewards from
-    function claimETHRewards(address token) external nonReentrant {
+    function claimEthPoolFee(address token) external nonReentrant {
         ETHPoolInfo storage pool = ethPools[token];
         ETHProvider storage provider = ethProviders[token][msg.sender];
         require(
@@ -706,12 +735,12 @@ contract GradientMarketMakerPool is
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit RewardClaimed(msg.sender, reward);
+        emit PoolFeeClaimed(msg.sender, reward, token, false);
     }
 
     /// @notice Claim token rewards for token providers
     /// @param token Address of the token pool to claim rewards from
-    function claimTokenRewards(address token) external nonReentrant {
+    function claimTokenPoolFee(address token) external nonReentrant {
         TokenPoolInfo storage pool = tokenPools[token];
         TokenProvider storage provider = tokenProviders[token][msg.sender];
         require(
@@ -729,98 +758,36 @@ contract GradientMarketMakerPool is
         provider.rewardDebt = accumulated;
         provider.pendingReward = 0;
 
-        IERC20(token).safeTransfer(msg.sender, reward);
-
-        emit RewardClaimed(msg.sender, reward);
-    }
-
-    /// @notice Claim token rewards for ETH providers
-    /// @param token Address of the token pool to claim rewards from
-    function claimETHTokenRewards(address token) external nonReentrant {
-        ETHPoolInfo storage pool = ethPools[token];
-        ETHProvider storage provider = ethProviders[token][msg.sender];
-        require(
-            provider.lpShares > 0 || provider.pendingTokenReward > 0,
-            "No liquidity or token rewards"
-        );
-
-        uint256 accumulated = (provider.lpShares *
-            pool.accTokenRewardPerShare) / SCALE;
-        uint256 reward = accumulated -
-            provider.tokenRewardDebt +
-            provider.pendingTokenReward;
-        require(reward > 0, "No token rewards");
-
-        provider.tokenRewardDebt = accumulated;
-        provider.pendingTokenReward = 0;
-
-        // Transfer tokens to ETH provider
-        IERC20(token).safeTransfer(msg.sender, reward);
-
-        emit RewardClaimed(msg.sender, reward);
-    }
-
-    /// @notice Claim ETH rewards for token providers
-    /// @param token Address of the token pool to claim rewards from
-    function claimTokenETHRewards(address token) external nonReentrant {
-        TokenPoolInfo storage pool = tokenPools[token];
-        TokenProvider storage provider = tokenProviders[token][msg.sender];
-        require(
-            provider.lpShares > 0 || provider.pendingETHReward > 0,
-            "No liquidity or ETH rewards"
-        );
-
-        uint256 accumulated = (provider.lpShares * pool.accETHRewardPerShare) /
-            SCALE;
-        uint256 reward = accumulated -
-            provider.ethRewardDebt +
-            provider.pendingETHReward;
-        require(reward > 0, "No ETH rewards");
-
-        provider.ethRewardDebt = accumulated;
-        provider.pendingETHReward = 0;
-
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit RewardClaimed(msg.sender, reward);
+        emit PoolFeeClaimed(msg.sender, reward, token, false);
     }
 
     /**
-     * @notice Emergency withdraw function for owner to withdraw all ETH and tokens
-     * @param tokens Array of token addresses to withdraw
-     * @dev Only callable by contract owner
+     * @notice Calculate withdrawal amount with proper validation
+     * @param sharesToBurn Number of shares being burned
+     * @param totalAmount Total amount in pool
+     * @param totalShares Total shares in pool
+     * @return withdrawalAmount Amount to withdraw
      */
-    function emergencyWithdraw(address[] calldata tokens) external onlyOwner {
-        // Withdraw all ETH
-        uint256 ethBalance = address(this).balance;
-        if (ethBalance > 0) {
-            (bool success, ) = owner().call{value: ethBalance}("");
-            require(success, "ETH withdrawal failed");
-        }
+    function _calculateWithdrawalAmount(
+        uint256 sharesToBurn,
+        uint256 totalAmount,
+        uint256 totalShares
+    ) internal pure returns (uint256 withdrawalAmount) {
+        require(sharesToBurn > 0, "Shares to burn must be greater than 0");
+        require(totalShares > 0, "Total shares must be greater than 0");
 
-        // Withdraw all specified tokens
-        for (uint256 i = 0; i < tokens.length; i++) {
-            address token = tokens[i];
-            if (token != address(0)) {
-                uint256 tokenBalance = IERC20(token).balanceOf(address(this));
-                if (tokenBalance > 0) {
-                    IERC20(token).safeTransfer(owner(), tokenBalance);
-                }
-            }
-        }
-    }
+        // Calculate withdrawal amount proportionally
+        withdrawalAmount = (sharesToBurn * totalAmount) / totalShares;
 
-    /**
-     * @notice Emergency withdraw function for owner to withdraw all ETH
-     * @dev Only callable by contract owner
-     */
-    function emergencyWithdrawETH() external onlyOwner {
-        uint256 balance = address(this).balance;
-        if (balance > 0) {
-            (bool success, ) = owner().call{value: balance}("");
-            require(success, "ETH withdrawal failed");
-        }
+        require(
+            withdrawalAmount <= totalAmount,
+            "Withdrawal amount exceeds pool balance"
+        );
+
+        return withdrawalAmount;
     }
 
     /**
@@ -920,10 +887,37 @@ contract GradientMarketMakerPool is
         IGradientRegistry _gradientRegistry
     ) external onlyOwner {
         require(
-            _gradientRegistry.marketMakerPool() != address(0),
+            address(_gradientRegistry) != address(0),
             "Invalid gradient registry"
         );
         gradientRegistry = _gradientRegistry;
+    }
+
+    /**
+     * @notice Set minimum ETH liquidity requirement
+     * @param _minLiquidity New minimum ETH liquidity amount
+     * @dev Only callable by the contract owner
+     */
+    function setMinLiquidity(uint256 _minLiquidity) external onlyOwner {
+        require(_minLiquidity > 0, "Minimum liquidity must be greater than 0");
+        minLiquidity = _minLiquidity;
+        emit MinLiquidityUpdated(_minLiquidity);
+    }
+
+    /**
+     * @notice Set minimum token liquidity requirement
+     * @param _minTokenLiquidity New minimum token liquidity amount
+     * @dev Only callable by the contract owner
+     */
+    function setMinTokenLiquidity(
+        uint256 _minTokenLiquidity
+    ) external onlyOwner {
+        require(
+            _minTokenLiquidity > 0,
+            "Minimum token liquidity must be greater than 0"
+        );
+        minTokenLiquidity = _minTokenLiquidity;
+        emit MinTokenLiquidityUpdated(_minTokenLiquidity);
     }
 
     /**
@@ -1003,5 +997,94 @@ contract GradientMarketMakerPool is
         return
             ethProviders[token][user].lpShares +
             tokenProviders[token][user].lpShares;
+    }
+
+    /**
+     * @notice Withdraw excessive funds that exceed LP contributions
+     * @param token Address of the token to withdraw excessive funds for
+     * @dev Only callable by contract owner
+     */
+    function withdrawExcessiveFunds(
+        address token
+    ) external onlyOwner nonReentrant {
+        require(token != address(0), "Invalid token address");
+
+        // Calculate excessive ETH (overall contract balance)
+        uint256 currentEthBalance = address(this).balance;
+        uint256 totalEthContributed = totalEthAdded - totalEthRemoved;
+        uint256 excessiveEth = 0;
+
+        if (currentEthBalance > totalEthContributed) {
+            excessiveEth = currentEthBalance - totalEthContributed;
+        }
+
+        // Calculate excessive tokens (overall contract balance)
+        uint256 currentTokenBalance = IERC20(token).balanceOf(address(this));
+        uint256 totalTokensContributed = totalTokensAdded[token] -
+            totalTokensRemoved[token];
+        uint256 excessiveTokens = 0;
+
+        if (currentTokenBalance > totalTokensContributed) {
+            excessiveTokens = currentTokenBalance - totalTokensContributed;
+        }
+
+        require(
+            excessiveEth > 0 || excessiveTokens > 0,
+            "No excessive funds to withdraw"
+        );
+
+        // Withdraw excessive ETH
+        if (excessiveEth > 0) {
+            (bool success, ) = owner().call{value: excessiveEth}("");
+            require(success, "ETH withdrawal failed");
+
+            emit ExcessiveFundsWithdrawn(
+                owner(),
+                address(0),
+                excessiveEth,
+                "Excessive ETH"
+            );
+        }
+
+        // Withdraw excessive tokens
+        if (excessiveTokens > 0) {
+            IERC20(token).safeTransfer(owner(), excessiveTokens);
+
+            emit ExcessiveFundsWithdrawn(
+                owner(),
+                token,
+                excessiveTokens,
+                "Excessive tokens"
+            );
+        }
+    }
+
+    /**
+     * @notice Get excessive funds information for a token
+     * @param token Address of the token
+     * @return excessiveEth Amount of excessive ETH
+     * @return excessiveTokens Amount of excessive tokens
+     */
+    function getExcessiveFunds(
+        address token
+    ) external view returns (uint256 excessiveEth, uint256 excessiveTokens) {
+        require(token != address(0), "Invalid token address");
+
+        // Calculate excessive ETH (overall contract balance)
+        uint256 currentEthBalance = address(this).balance;
+        uint256 totalEthContributed = totalEthAdded - totalEthRemoved;
+
+        if (currentEthBalance > totalEthContributed) {
+            excessiveEth = currentEthBalance - totalEthContributed;
+        }
+
+        // Calculate excessive tokens (overall contract balance)
+        uint256 currentTokenBalance = IERC20(token).balanceOf(address(this));
+        uint256 totalTokensContributed = totalTokensAdded[token] -
+            totalTokensRemoved[token];
+
+        if (currentTokenBalance > totalTokensContributed) {
+            excessiveTokens = currentTokenBalance - totalTokensContributed;
+        }
     }
 }
