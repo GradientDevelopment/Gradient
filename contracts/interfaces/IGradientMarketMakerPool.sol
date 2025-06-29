@@ -32,6 +32,8 @@ interface IGradientMarketMakerPool {
         uint256 accountedToken;
         uint256 totalTokens;
         uint256 totalLPShares;
+        uint256 virtualTokens; // Virtual tokens from new LPs
+        uint256 virtualLPShares; // Virtual LP shares from new LPs
         uint256 accRewardPerShare;
         uint256 rewardBalance;
         uint256 accETHRewardPerShare; // For ETH rewards to token providers
@@ -42,6 +44,8 @@ interface IGradientMarketMakerPool {
     struct TokenProvider {
         uint256 tokenAmount;
         uint256 lpShares;
+        uint256 virtualLPShares; // User's virtual shares
+        uint256 virtualTokenAmount; // User's virtual tokens
         uint256 rewardDebt;
         uint256 pendingReward;
         uint256 ethRewardDebt; // For ETH rewards

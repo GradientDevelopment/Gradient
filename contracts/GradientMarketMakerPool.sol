@@ -335,28 +335,47 @@ contract GradientMarketMakerPool is
             provider.pendingETHReward += pendingEth;
         }
 
-        // Calculate LP shares to mint
-        uint256 lpSharesToMint = _calculateLPShares(
-            tokenAmount,
-            pool.accountedToken,
-            pool.totalLPShares
-        );
+        // Check if there are existing LPs
+        if (pool.totalLPShares > 0) {
+            // Add to virtual liquidity for new LPs
+            pool.virtualTokens += tokenAmount;
+            pool.virtualLPShares += tokenAmount;
+            provider.virtualLPShares += tokenAmount;
+            provider.virtualTokenAmount += tokenAmount;
 
-        provider.lpShares += lpSharesToMint;
-        provider.tokenAmount += tokenAmount;
-        provider.rewardDebt =
-            (provider.lpShares * pool.accRewardPerShare) /
-            SCALE;
-        provider.ethRewardDebt =
-            (provider.lpShares * pool.accETHRewardPerShare) /
-            SCALE;
+            // Update reward debt for existing shares (calculate total for all shares)
+            if (provider.lpShares > 0) {
+                provider.rewardDebt =
+                    (provider.lpShares * pool.accRewardPerShare) /
+                    SCALE;
+                provider.ethRewardDebt =
+                    (provider.lpShares * pool.accETHRewardPerShare) /
+                    SCALE;
+            }
+        } else {
+            // First LP gets real liquidity
+            uint256 lpSharesToMint = _calculateLPShares(
+                tokenAmount,
+                pool.accountedToken,
+                pool.totalLPShares
+            );
 
-        pool.totalTokens += tokenAmount;
-        pool.accountedToken += tokenAmount;
-        pool.totalLPShares += lpSharesToMint;
+            provider.lpShares += lpSharesToMint;
+            provider.tokenAmount += tokenAmount;
+            provider.rewardDebt =
+                (provider.lpShares * pool.accRewardPerShare) /
+                SCALE;
+            provider.ethRewardDebt =
+                (provider.lpShares * pool.accETHRewardPerShare) /
+                SCALE;
 
-        // Track total tokens added by LPs
-        totalTokensAdded[token] += tokenAmount;
+            pool.totalTokens += tokenAmount;
+            pool.accountedToken += tokenAmount;
+            pool.totalLPShares += lpSharesToMint;
+
+            // Track total tokens added by LPs
+            totalTokensAdded[token] += tokenAmount;
+        }
 
         // Transfer tokens from user
         IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmount);
@@ -365,7 +384,13 @@ contract GradientMarketMakerPool is
             msg.sender,
             token,
             tokenAmount,
-            lpSharesToMint
+            pool.totalLPShares > 0
+                ? tokenAmount
+                : _calculateLPShares(
+                    tokenAmount,
+                    pool.accountedToken,
+                    pool.totalLPShares
+                )
         );
     }
 
@@ -526,67 +551,126 @@ contract GradientMarketMakerPool is
         TokenPoolInfo storage pool = tokenPools[token];
         TokenProvider storage provider = tokenProviders[token][msg.sender];
 
-        require(pool.totalLPShares > 0, "No token liquidity in pool");
-        require(provider.tokenAmount > 0, "No token liquidity to withdraw");
+        require(
+            pool.totalLPShares > 0 || provider.virtualLPShares > 0,
+            "No token liquidity in pool"
+        );
+        require(
+            provider.tokenAmount > 0 || provider.virtualTokenAmount > 0,
+            "No token liquidity to withdraw"
+        );
 
         // Calculate pending token rewards before withdrawing
-        uint256 pendingTokens = (provider.lpShares * pool.accRewardPerShare) /
-            SCALE -
-            provider.rewardDebt;
-        provider.pendingReward += pendingTokens;
+        if (provider.lpShares > 0) {
+            uint256 pendingTokens = (provider.lpShares *
+                pool.accRewardPerShare) /
+                SCALE -
+                provider.rewardDebt;
+            provider.pendingReward += pendingTokens;
 
-        // Calculate pending ETH rewards before withdrawing
-        uint256 pendingEth = (provider.lpShares * pool.accETHRewardPerShare) /
-            SCALE -
-            provider.ethRewardDebt;
-        provider.pendingETHReward += pendingEth;
+            // Calculate pending ETH rewards before withdrawing
+            uint256 pendingEth = (provider.lpShares *
+                pool.accETHRewardPerShare) /
+                SCALE -
+                provider.ethRewardDebt;
+            provider.pendingETHReward += pendingEth;
+        }
 
-        uint256 lpSharesToBurn;
+        uint256 totalTokensToWithdraw = 0;
+        uint256 totalSharesToBurn = 0;
 
-        lpSharesToBurn = (provider.lpShares * shares) / 10000;
-        require(lpSharesToBurn > 0, "No shares to burn");
-        require(
-            lpSharesToBurn <= provider.lpShares,
-            "Insufficient shares to burn"
-        );
+        // Withdraw from virtual liquidity first
+        if (provider.virtualLPShares > 0) {
+            uint256 virtualSharesToBurn = (provider.virtualLPShares * shares) /
+                10000;
+            require(virtualSharesToBurn > 0, "No virtual shares to burn");
+            require(
+                virtualSharesToBurn <= provider.virtualLPShares,
+                "Insufficient virtual shares to burn"
+            );
 
-        // Calculate actual withdrawal amounts based on LP shares
-        uint256 actualTokenWithdraw = _calculateWithdrawalAmount(
-            lpSharesToBurn,
-            pool.totalTokens,
-            pool.totalLPShares
-        );
-        require(
-            actualTokenWithdraw <= pool.totalTokens,
-            "Insufficient tokens in pool"
-        );
+            uint256 virtualTokensToWithdraw = (provider.virtualTokenAmount *
+                shares) / 10000;
 
-        // Update balances
-        provider.tokenAmount -= actualTokenWithdraw;
-        provider.lpShares -= lpSharesToBurn;
+            // Check if virtual liquidity has been converted to real liquidity
+            if (pool.virtualTokens == 0 && pool.virtualLPShares == 0) {
+                // Virtual liquidity was converted to real liquidity
+                // Convert user's virtual shares to real shares
+                provider.lpShares += virtualSharesToBurn;
+                provider.tokenAmount += virtualTokensToWithdraw;
 
-        // Calculate accounted values BEFORE reducing totalLPShares
-        uint256 accountedTokenToRemove = (pool.accountedToken *
-            lpSharesToBurn) / pool.totalLPShares;
+                // Update reward debt for the newly converted shares
+                provider.rewardDebt +=
+                    (virtualSharesToBurn * pool.accRewardPerShare) /
+                    SCALE;
+                provider.ethRewardDebt +=
+                    (virtualSharesToBurn * pool.accETHRewardPerShare) /
+                    SCALE;
 
-        pool.totalTokens -= actualTokenWithdraw;
-        pool.totalLPShares -= lpSharesToBurn;
-        pool.accountedToken -= accountedTokenToRemove;
+                // Remove the converted virtual shares to prevent double conversion
+                provider.virtualLPShares -= virtualSharesToBurn;
+                provider.virtualTokenAmount -= virtualTokensToWithdraw;
+            } else {
+                // Virtual liquidity still exists, withdraw from virtual
+                provider.virtualLPShares -= virtualSharesToBurn;
+                provider.virtualTokenAmount -= virtualTokensToWithdraw;
+                pool.virtualTokens -= virtualTokensToWithdraw;
+                pool.virtualLPShares -= virtualSharesToBurn;
+            }
 
-        // Update reward debt for remaining shares
-        provider.rewardDebt =
-            (provider.lpShares * pool.accRewardPerShare) /
-            SCALE;
-        provider.ethRewardDebt =
-            (provider.lpShares * pool.accETHRewardPerShare) /
-            SCALE;
+            totalTokensToWithdraw += virtualTokensToWithdraw;
+            totalSharesToBurn += virtualSharesToBurn;
+        }
+
+        // Then withdraw from real liquidity
+        if (provider.lpShares > 0) {
+            uint256 realSharesToBurn = (provider.lpShares * shares) / 10000;
+            require(realSharesToBurn > 0, "No real shares to burn");
+            require(
+                realSharesToBurn <= provider.lpShares,
+                "Insufficient real shares to burn"
+            );
+
+            uint256 realTokensToWithdraw = _calculateWithdrawalAmount(
+                realSharesToBurn,
+                pool.totalTokens,
+                pool.totalLPShares
+            );
+            require(
+                realTokensToWithdraw <= pool.totalTokens,
+                "Insufficient tokens in pool"
+            );
+
+            // Update real liquidity balances
+            provider.tokenAmount -= realTokensToWithdraw;
+            provider.lpShares -= realSharesToBurn;
+
+            // Calculate accounted values BEFORE reducing totalLPShares
+            uint256 accountedTokenToRemove = (pool.accountedToken *
+                realSharesToBurn) / pool.totalLPShares;
+
+            pool.totalTokens -= realTokensToWithdraw;
+            pool.totalLPShares -= realSharesToBurn;
+            pool.accountedToken -= accountedTokenToRemove;
+
+            // Update reward debt for remaining shares
+            provider.rewardDebt =
+                (provider.lpShares * pool.accRewardPerShare) /
+                SCALE;
+            provider.ethRewardDebt =
+                (provider.lpShares * pool.accETHRewardPerShare) /
+                SCALE;
+
+            totalTokensToWithdraw += realTokensToWithdraw;
+            totalSharesToBurn += realSharesToBurn;
+        }
 
         // Transfer tokens back to user
         require(
-            actualTokenWithdraw >= minTokenAmount,
+            totalTokensToWithdraw >= minTokenAmount,
             "Insufficient token withdrawn"
         );
-        IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
+        IERC20(token).safeTransfer(msg.sender, totalTokensToWithdraw);
 
         // Transfer accumulated ETH rewards to user
         if (provider.pendingETHReward > 0) {
@@ -599,13 +683,13 @@ contract GradientMarketMakerPool is
         }
 
         // Track total tokens removed by LPs
-        totalTokensRemoved[token] += actualTokenWithdraw;
+        totalTokensRemoved[token] += totalTokensToWithdraw;
 
         emit TokenLiquidityWithdrawn(
             msg.sender,
             token,
-            actualTokenWithdraw,
-            lpSharesToBurn
+            totalTokensToWithdraw,
+            totalSharesToBurn
         );
     }
 
@@ -626,10 +710,20 @@ contract GradientMarketMakerPool is
         require(msg.value == ethAmount, "ETH amount mismatch");
 
         TokenPoolInfo storage tokenPool = tokenPools[token];
+
+        // Check if we have sufficient liquidity (including virtual tokens)
         require(
-            tokenPool.totalTokens >= tokenAmount,
+            (tokenPool.totalTokens + tokenPool.virtualTokens) >= tokenAmount,
             "Insufficient token liquidity"
         );
+
+        // Convert virtual liquidity to real liquidity if any exists
+        if (tokenPool.virtualTokens > 0) {
+            tokenPool.totalTokens += tokenPool.virtualTokens;
+            tokenPool.totalLPShares += tokenPool.virtualLPShares;
+            tokenPool.virtualTokens = 0;
+            tokenPool.virtualLPShares = 0;
+        }
 
         // Token pool provides tokens to orderbook
         tokenPool.totalTokens -= tokenAmount;
@@ -875,7 +969,34 @@ contract GradientMarketMakerPool is
         address token,
         address user
     ) external view returns (uint256 lpShares) {
+        TokenProvider storage provider = tokenProviders[token][user];
+        return provider.lpShares + provider.virtualLPShares;
+    }
+
+    /**
+     * @notice Gets a user's real LP shares for token pool
+     * @param token Address of the token
+     * @param user Address of the user
+     * @return lpShares User's real LP shares in token pool
+     */
+    function getTokenProviderRealLPShares(
+        address token,
+        address user
+    ) external view returns (uint256 lpShares) {
         return tokenProviders[token][user].lpShares;
+    }
+
+    /**
+     * @notice Gets a user's virtual LP shares for token pool
+     * @param token Address of the token
+     * @param user Address of the user
+     * @return lpShares User's virtual LP shares in token pool
+     */
+    function getTokenProviderVirtualLPShares(
+        address token,
+        address user
+    ) external view returns (uint256 lpShares) {
+        return tokenProviders[token][user].virtualLPShares;
     }
 
     /**
