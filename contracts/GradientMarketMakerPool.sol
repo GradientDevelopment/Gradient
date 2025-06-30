@@ -17,16 +17,34 @@ contract GradientMarketMakerPool is
     IGradientMarketMakerPool
 {
     using SafeERC20 for IERC20;
-
     IGradientRegistry public gradientRegistry;
 
-    // Separate pools for ETH and Token providers
-    mapping(address => ETHPoolInfo) public ethPools; // token => ETHPoolInfo
-    mapping(address => TokenPoolInfo) public tokenPools; // token => TokenPoolInfo
+    // Epoch-based storage
+    // token => currentEpoch (for ETH pool)
+    mapping(address => uint256) public currentETHEpochs;
+    // token => currentEpoch (for token pool)
+    mapping(address => uint256) public currentTokenEpochs;
 
-    // User positions in each pool
-    mapping(address => mapping(address => ETHProvider)) public ethProviders; // token => user => info
-    mapping(address => mapping(address => TokenProvider)) public tokenProviders; // token => user => info
+    // token => epoch => ETHPoolInfo
+    mapping(address => mapping(uint256 => ETHPoolInfo)) public ethPools;
+    // token => epoch => TokenPoolInfo
+    mapping(address => mapping(uint256 => TokenPoolInfo)) public tokenPools;
+
+    // User positions in each epoch
+    // token => user => epoch => ETHProvider
+    mapping(address => mapping(address => mapping(uint256 => ETHProvider)))
+        public ethProviders;
+    // token => user => epoch => TokenProvider
+    mapping(address => mapping(address => mapping(uint256 => TokenProvider)))
+        public tokenProviders;
+
+    // Track user's participated epochs
+    // token => user => ETH epochIds[]
+    mapping(address => mapping(address => uint256[]))
+        public userParticipatedETHEpochs;
+    // token => user => token epochIds[]
+    mapping(address => mapping(address => uint256[]))
+        public userParticipatedTokenEpochs;
 
     uint256 public constant SCALE = 1e18;
 
@@ -102,12 +120,17 @@ contract GradientMarketMakerPool is
     /**
      * @notice Updates ETH pool rewards before modifying state
      * @param token Address of the token for the pool
+     * @param epoch Epoch to update
      * @param ethAmount Amount of ETH to distribute as rewards
      */
-    function _updateETHPool(address token, uint256 ethAmount) internal {
+    function _updateETHPool(
+        address token,
+        uint256 epoch,
+        uint256 ethAmount
+    ) internal {
         require(ethAmount > 0, "ETH amount must be greater than 0");
         require(token != address(0), "Invalid token address");
-        ETHPoolInfo storage pool = ethPools[token];
+        ETHPoolInfo storage pool = ethPools[token][epoch];
 
         if (pool.totalLPShares == 0) return;
 
@@ -127,10 +150,14 @@ contract GradientMarketMakerPool is
      * @param token Address of the token for the pool
      * @param ethAmount Amount of ETH to distribute as rewards
      */
-    function _updateTokenPool(address token, uint256 ethAmount) internal {
+    function _updateTokenPool(
+        address token,
+        uint256 epoch,
+        uint256 ethAmount
+    ) internal {
         require(ethAmount > 0, "ETH amount must be greater than 0");
         require(token != address(0), "Invalid token address");
-        TokenPoolInfo storage pool = tokenPools[token];
+        TokenPoolInfo storage pool = tokenPools[token][epoch];
 
         if (pool.totalLPShares == 0) return;
 
@@ -156,7 +183,7 @@ contract GradientMarketMakerPool is
     ) internal {
         require(tokenAmount > 0, "Token amount must be greater than 0");
         require(token != address(0), "Invalid token address");
-        ETHPoolInfo storage pool = ethPools[token];
+        ETHPoolInfo storage pool = ethPools[token][currentETHEpochs[token]];
 
         if (pool.totalLPShares == 0) return;
 
@@ -182,7 +209,9 @@ contract GradientMarketMakerPool is
     ) internal {
         require(ethAmount > 0, "ETH amount must be greater than 0");
         require(token != address(0), "Invalid token address");
-        TokenPoolInfo storage pool = tokenPools[token];
+        TokenPoolInfo storage pool = tokenPools[token][
+            currentTokenEpochs[token]
+        ];
 
         if (pool.totalLPShares == 0) return;
 
@@ -234,14 +263,24 @@ contract GradientMarketMakerPool is
      * @param ethAmount Amount of ETH to deposit
      */
     function _addETHLiquidity(address token, uint256 ethAmount) internal {
-        ETHPoolInfo storage pool = ethPools[token];
+        ETHPoolInfo storage pool = ethPools[token][currentETHEpochs[token]];
 
         if (pool.uniswapPair == address(0)) {
             pool.uniswapPair = getPairAddress(token);
         }
         require(pool.uniswapPair != address(0), "Pair does not exist");
 
-        ETHProvider storage provider = ethProviders[token][msg.sender];
+        ETHProvider storage provider = ethProviders[token][msg.sender][
+            currentETHEpochs[token]
+        ];
+
+        // Add user to participated epochs
+        _addUserToParticipatedEpochs(
+            token,
+            msg.sender,
+            currentETHEpochs[token],
+            true
+        );
 
         // Calculate pending ETH rewards before update
         if (provider.lpShares > 0) {
@@ -310,14 +349,26 @@ contract GradientMarketMakerPool is
      * @param tokenAmount Amount of tokens to deposit
      */
     function _addTokenLiquidity(address token, uint256 tokenAmount) internal {
-        TokenPoolInfo storage pool = tokenPools[token];
+        TokenPoolInfo storage pool = tokenPools[token][
+            currentTokenEpochs[token]
+        ];
 
         if (pool.uniswapPair == address(0)) {
             pool.uniswapPair = getPairAddress(token);
         }
         require(pool.uniswapPair != address(0), "Pair does not exist");
 
-        TokenProvider storage provider = tokenProviders[token][msg.sender];
+        TokenProvider storage provider = tokenProviders[token][msg.sender][
+            currentTokenEpochs[token]
+        ];
+
+        // Add user to participated epochs
+        _addUserToParticipatedEpochs(
+            token,
+            msg.sender,
+            currentTokenEpochs[token],
+            false
+        );
 
         // Calculate pending token rewards before update
         if (provider.lpShares > 0) {
@@ -370,23 +421,121 @@ contract GradientMarketMakerPool is
     }
 
     /**
+     * @notice Remove all liquidity from the pool by providing epochs, shares and min amounts
+     * @param token Address of the token to withdraw from
+     * @param ethEpochs Epochs to remove liquidity from
+     * @param tokenEpochs Epochs to remove liquidity from
+     * @param ethShares Percentages of pool to withdraw (in basis points, 10000 = 100%)
+     * @param tokenShares Percentages of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minEthAmounts Minimum amounts of ETH to receive
+     * @param minTokenAmounts Minimum amounts of tokens to receive
+     */
+    function removeAllEpochsLiquidity(
+        address token,
+        uint256[] memory ethEpochs,
+        uint256[] memory tokenEpochs,
+        uint256[] memory ethShares,
+        uint256[] memory tokenShares,
+        uint256[] memory minEthAmounts,
+        uint256[] memory minTokenAmounts
+    ) external isNotBlocked(token) nonReentrant {
+        require(token != address(0), "Invalid token address");
+        require(
+            ethEpochs.length == ethShares.length &&
+                ethEpochs.length == minEthAmounts.length,
+            "Invalid ETH epochs length"
+        );
+        require(
+            tokenEpochs.length == tokenShares.length &&
+                tokenEpochs.length == minTokenAmounts.length,
+            "Invalid token epochs length"
+        );
+
+        for (uint256 i = 0; i < ethEpochs.length; i++) {
+            require(
+                ethShares[i] > 0 && ethShares[i] <= 10000,
+                "Invalid shares percentage"
+            );
+            require(ethEpochs[i] <= currentETHEpochs[token], "Invalid epoch");
+            _removeETHLiquidity(
+                token,
+                ethShares[i],
+                minEthAmounts[i],
+                ethEpochs[i]
+            );
+        }
+
+        for (uint256 i = 0; i < tokenEpochs.length; i++) {
+            require(
+                tokenShares[i] > 0 && tokenShares[i] <= 10000,
+                "Invalid shares percentage"
+            );
+            require(
+                tokenEpochs[i] <= currentTokenEpochs[token],
+                "Invalid epoch"
+            );
+            _removeTokenLiquidity(
+                token,
+                tokenShares[i],
+                minTokenAmounts[i],
+                tokenEpochs[i]
+            );
+        }
+    }
+
+    /**
      * @notice Remove liquidity from the pool
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
      * @param minEthAmount Minimum amount of ETH to receive
      * @param minTokenAmount Minimum amount of tokens to receive
+     * @param currentETHEpoch Current ETH epoch
+     * @param currentTokenEpoch Current token epoch
      */
     function removeLiquidity(
         address token,
         uint256 shares,
         uint256 minEthAmount,
-        uint256 minTokenAmount
+        uint256 minTokenAmount,
+        uint256 currentETHEpoch,
+        uint256 currentTokenEpoch
     ) external isNotBlocked(token) nonReentrant {
         require(shares > 0 && shares <= 10000, "Invalid shares percentage");
         require(token != address(0), "Invalid token address");
 
-        _removeETHLiquidity(token, shares, minEthAmount);
-        _removeTokenLiquidity(token, shares, minTokenAmount);
+        _removeETHLiquidity(token, shares, minEthAmount, currentETHEpoch);
+        _removeTokenLiquidity(token, shares, minTokenAmount, currentTokenEpoch);
+    }
+
+    /**
+     * @notice Remove all ETH liquidity from the pool by providing epochs, shares and minEthAmounts
+     * @param token Address of the token to withdraw from
+     * @param epochs Epochs to remove liquidity from
+     * @param shares Percentages of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minEthAmounts Minimum amounts of ETH to receive
+     */
+    function removeAllETHLiquidity(
+        address token,
+        uint256[] memory epochs,
+        uint256[] memory shares,
+        uint256[] memory minEthAmounts
+    ) external isNotBlocked(token) nonReentrant {
+        require(token != address(0), "Invalid token address");
+        require(
+            epochs.length == shares.length &&
+                epochs.length == minEthAmounts.length,
+            "Invalid epochs length"
+        );
+
+        for (uint256 i = 0; i < epochs.length; i++) {
+            require(
+                shares[i] > 0 && shares[i] <= 10000,
+                "Invalid shares percentage"
+            );
+            require(epochs[i] <= currentETHEpochs[token], "Invalid epoch");
+
+            _removeETHLiquidity(token, shares[i], minEthAmounts[i], epochs[i]);
+        }
     }
 
     /**
@@ -394,15 +543,17 @@ contract GradientMarketMakerPool is
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
      * @param minEthAmount Minimum amount of ETH to receive
+     * @param epoch Epoch to remove liquidity from
      */
     function removeETHLiquidity(
         address token,
         uint256 shares,
-        uint256 minEthAmount
+        uint256 minEthAmount,
+        uint256 epoch
     ) external isNotBlocked(token) nonReentrant {
         require(shares > 0 && shares <= 10000, "Invalid shares percentage");
         require(token != address(0), "Invalid token address");
-        _removeETHLiquidity(token, shares, minEthAmount);
+        _removeETHLiquidity(token, shares, minEthAmount, epoch);
     }
 
     /**
@@ -410,14 +561,16 @@ contract GradientMarketMakerPool is
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
      * @param minEthAmount Minimum amount of ETH to receive
+     * @param epoch Epoch to remove liquidity from
      */
     function _removeETHLiquidity(
         address token,
         uint256 shares,
-        uint256 minEthAmount
+        uint256 minEthAmount,
+        uint256 epoch
     ) internal {
-        ETHPoolInfo storage pool = ethPools[token];
-        ETHProvider storage provider = ethProviders[token][msg.sender];
+        ETHPoolInfo storage pool = ethPools[token][epoch];
+        ETHProvider storage provider = ethProviders[token][msg.sender][epoch];
 
         require(pool.totalLPShares > 0, "No ETH liquidity in pool");
         require(provider.ethAmount > 0, "No ETH liquidity to withdraw");
@@ -487,7 +640,13 @@ contract GradientMarketMakerPool is
             provider.pendingTokenReward = 0;
             IERC20(token).safeTransfer(msg.sender, tokenRewards);
 
-            emit PoolSharesClaimed(msg.sender, tokenRewards, token, false);
+            emit PoolSharesClaimed(
+                msg.sender,
+                tokenRewards,
+                token,
+                epoch,
+                false
+            );
         }
 
         // Track total ETH removed by LPs
@@ -496,9 +655,45 @@ contract GradientMarketMakerPool is
         emit ETHLiquidityWithdrawn(
             msg.sender,
             token,
+            epoch,
             actualEthWithdraw,
             lpSharesToBurn
         );
+    }
+
+    /**
+     * @notice Remove all token liquidity from the pool by providing epochs, shares and minTokenAmounts
+     * @param token Address of the token to withdraw from
+     * @param epochs Epochs to remove liquidity from
+     * @param shares Percentages of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minTokenAmounts Minimum amounts of tokens to receive
+     */
+    function removeAllTokenLiquidity(
+        address token,
+        uint256[] memory epochs,
+        uint256[] memory shares,
+        uint256[] memory minTokenAmounts
+    ) external isNotBlocked(token) nonReentrant {
+        require(token != address(0), "Invalid token address");
+        require(
+            epochs.length == shares.length &&
+                epochs.length == minTokenAmounts.length,
+            "Invalid epochs length"
+        );
+
+        for (uint256 i = 0; i < epochs.length; i++) {
+            require(
+                shares[i] > 0 && shares[i] <= 10000,
+                "Invalid shares percentage"
+            );
+            require(epochs[i] <= currentTokenEpochs[token], "Invalid epoch");
+            _removeTokenLiquidity(
+                token,
+                shares[i],
+                minTokenAmounts[i],
+                epochs[i]
+            );
+        }
     }
 
     /**
@@ -510,21 +705,32 @@ contract GradientMarketMakerPool is
     function removeTokenLiquidity(
         address token,
         uint256 shares,
-        uint256 minTokenAmount
+        uint256 minTokenAmount,
+        uint256 epoch
     ) external isNotBlocked(token) nonReentrant {
         require(shares > 0 && shares <= 10000, "Invalid shares percentage");
         require(token != address(0), "Invalid token address");
 
-        _removeTokenLiquidity(token, shares, minTokenAmount);
+        _removeTokenLiquidity(token, shares, minTokenAmount, epoch);
     }
 
+    /**
+     * @notice Remove token liquidity from the pool
+     * @param token Address of the token to withdraw from
+     * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param minTokenAmount Minimum amount of tokens to receive
+     * @param epoch Epoch to remove liquidity from
+     */
     function _removeTokenLiquidity(
         address token,
         uint256 shares,
-        uint256 minTokenAmount
+        uint256 minTokenAmount,
+        uint256 epoch
     ) internal {
-        TokenPoolInfo storage pool = tokenPools[token];
-        TokenProvider storage provider = tokenProviders[token][msg.sender];
+        TokenPoolInfo storage pool = tokenPools[token][epoch];
+        TokenProvider storage provider = tokenProviders[token][msg.sender][
+            epoch
+        ];
 
         require(pool.totalLPShares > 0, "No token liquidity in pool");
         require(provider.tokenAmount > 0, "No token liquidity to withdraw");
@@ -595,7 +801,7 @@ contract GradientMarketMakerPool is
             (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
             require(success, "ETH reward transfer failed");
 
-            emit PoolSharesClaimed(msg.sender, ethRewards, token, true);
+            emit PoolSharesClaimed(msg.sender, ethRewards, token, epoch, true);
         }
 
         // Track total tokens removed by LPs
@@ -604,6 +810,7 @@ contract GradientMarketMakerPool is
         emit TokenLiquidityWithdrawn(
             msg.sender,
             token,
+            epoch,
             actualTokenWithdraw,
             lpSharesToBurn
         );
@@ -625,7 +832,9 @@ contract GradientMarketMakerPool is
         require(tokenAmount > 0, "Token amount must be greater than 0");
         require(msg.value == ethAmount, "ETH amount mismatch");
 
-        TokenPoolInfo storage tokenPool = tokenPools[token];
+        TokenPoolInfo storage tokenPool = tokenPools[token][
+            currentTokenEpochs[token]
+        ];
         require(
             tokenPool.totalTokens >= tokenAmount,
             "Insufficient token liquidity"
@@ -640,12 +849,16 @@ contract GradientMarketMakerPool is
         // Transfer tokens to orderbook
         IERC20(token).safeTransfer(msg.sender, tokenAmount);
 
+        // Check if token pool is empty and increment token epoch if needed
+        _checkAndIncrementTokenEpoch(token);
+
         emit PoolBalanceUpdated(
             token,
-            ethPools[token].totalETH,
+            ethPools[token][currentETHEpochs[token]].totalETH,
             tokenPool.totalTokens,
-            ethPools[token].totalLPShares,
-            tokenPool.totalLPShares
+            ethPools[token][currentETHEpochs[token]].totalLPShares,
+            tokenPool.totalLPShares,
+            currentETHEpochs[token]
         );
     }
 
@@ -664,7 +877,7 @@ contract GradientMarketMakerPool is
         require(ethAmount > 0, "ETH amount must be greater than 0");
         require(tokenAmount > 0, "Token amount must be greater than 0");
 
-        ETHPoolInfo storage ethPool = ethPools[token];
+        ETHPoolInfo storage ethPool = ethPools[token][currentETHEpochs[token]];
         require(ethPool.totalETH >= ethAmount, "Insufficient ETH liquidity");
 
         // Transfer tokens from orderbook to market maker pool
@@ -681,42 +894,82 @@ contract GradientMarketMakerPool is
         (bool success, ) = payable(msg.sender).call{value: ethAmount}("");
         require(success, "ETH transfer to orderbook failed");
 
+        // Check if ETH pool is empty and increment ETH epoch if needed
+        _checkAndIncrementETHEpoch(token);
+
         emit PoolBalanceUpdated(
             token,
             ethPool.totalETH,
-            tokenPools[token].totalTokens,
+            tokenPools[token][currentTokenEpochs[token]].totalTokens,
             ethPool.totalLPShares,
-            tokenPools[token].totalLPShares
+            tokenPools[token][currentTokenEpochs[token]].totalLPShares,
+            currentTokenEpochs[token]
         );
     }
 
     /// @notice Distributes fee distribution from orderbook to be distributed to market makers
     /// @param token Address of the token pool to distribute fees for
+    /// @param epoch Epoch to distribute fee.
     /// @param isETHPool Whether to distribute to ETH pool (true) or token pool (false)
     function distributePoolFee(
         address token,
+        uint256 epoch,
         bool isETHPool
     ) external payable onlyRewardDistributor {
         require(msg.value > 0, "No ETH sent");
 
         if (isETHPool) {
-            ETHPoolInfo storage pool = ethPools[token];
+            ETHPoolInfo storage pool = ethPools[token][epoch];
             require(pool.totalLPShares > 0, "No ETH liquidity");
-            _updateETHPool(token, msg.value);
+            _updateETHPool(token, epoch, msg.value);
         } else {
-            TokenPoolInfo storage pool = tokenPools[token];
+            TokenPoolInfo storage pool = tokenPools[token][epoch];
             require(pool.totalLPShares > 0, "No token liquidity");
-            _updateTokenPool(token, msg.value);
+            _updateTokenPool(token, epoch, msg.value);
         }
 
-        emit PoolFeeDistributed(msg.sender, msg.value, token, isETHPool);
+        emit PoolFeeDistributed(msg.sender, msg.value, token, epoch, isETHPool);
+    }
+
+    /**
+     * @notice Claim all epochs pool fees for a token
+     * @param token Address of the token pool to claim rewards from
+     * @param epochs Epochs to claim rewards from
+     * @param isETHPool Whether to claim ETH pool fees (true) or token pool fees (false)
+     */
+    function claimAllEpochsPoolFee(
+        address token,
+        uint256[] memory epochs,
+        bool isETHPool
+    ) external nonReentrant {
+        for (uint256 i = 0; i < epochs.length; i++) {
+            if (isETHPool) {
+                _claimEthPoolFee(token, epochs[i]);
+            } else {
+                _claimTokenPoolFee(token, epochs[i]);
+            }
+        }
     }
 
     /// @notice Claim ETH rewards for ETH providers
     /// @param token Address of the token pool to claim rewards from
-    function claimEthPoolFee(address token) external nonReentrant {
-        ETHPoolInfo storage pool = ethPools[token];
-        ETHProvider storage provider = ethProviders[token][msg.sender];
+    /// @param epoch Epoch to claim rewards from
+    function claimEthPoolFee(
+        address token,
+        uint256 epoch
+    ) external nonReentrant {
+        _claimEthPoolFee(token, epoch);
+    }
+
+    /**
+     * @notice Claim ETH rewards for ETH providers
+     * @param token Address of the token pool to claim rewards from
+     * @param epoch Epoch to claim rewards from
+     */
+    function _claimEthPoolFee(address token, uint256 epoch) internal {
+        ETHPoolInfo storage pool = ethPools[token][epoch];
+        ETHProvider storage provider = ethProviders[token][msg.sender][epoch];
+
         require(
             provider.lpShares > 0 || provider.pendingReward > 0,
             "No liquidity or rewards"
@@ -735,14 +988,29 @@ contract GradientMarketMakerPool is
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit PoolFeeClaimed(msg.sender, reward, token, false);
+        emit PoolFeeClaimed(msg.sender, reward, token, epoch, false);
     }
 
     /// @notice Claim token rewards for token providers
     /// @param token Address of the token pool to claim rewards from
-    function claimTokenPoolFee(address token) external nonReentrant {
-        TokenPoolInfo storage pool = tokenPools[token];
-        TokenProvider storage provider = tokenProviders[token][msg.sender];
+    /// @param epoch Epoch to claim rewards from
+    function claimTokenPoolFee(
+        address token,
+        uint256 epoch
+    ) external nonReentrant {
+        _claimTokenPoolFee(token, epoch);
+    }
+
+    /**
+     * @notice Claim token rewards for token providers
+     * @param token Address of the token pool to claim rewards from
+     * @param epoch Epoch to claim rewards from
+     */
+    function _claimTokenPoolFee(address token, uint256 epoch) internal {
+        TokenPoolInfo storage pool = tokenPools[token][epoch];
+        TokenProvider storage provider = tokenProviders[token][msg.sender][
+            epoch
+        ];
         require(
             provider.lpShares > 0 || provider.pendingReward > 0,
             "No liquidity or rewards"
@@ -761,7 +1029,7 @@ contract GradientMarketMakerPool is
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit PoolFeeClaimed(msg.sender, reward, token, false);
+        emit PoolFeeClaimed(msg.sender, reward, token, epoch, false);
     }
 
     /**
@@ -793,89 +1061,42 @@ contract GradientMarketMakerPool is
     /**
      * @notice Gets ETH pool information for a specific token
      * @param token Address of the token to get ETH pool info for
+     * @param epoch Epoch to get ETH pool info for
      * @return ETHPoolInfo struct containing ETH pool details
      */
     function getETHPoolInfo(
-        address token
+        address token,
+        uint256 epoch
     ) external view returns (ETHPoolInfo memory) {
-        return ethPools[token];
+        return ethPools[token][epoch];
     }
 
     /**
      * @notice Gets token pool information for a specific token
      * @param token Address of the token to get token pool info for
+     * @param epoch Epoch to get token pool info for
      * @return TokenPoolInfo struct containing token pool details
      */
     function getTokenPoolInfo(
-        address token
+        address token,
+        uint256 epoch
     ) external view returns (TokenPoolInfo memory) {
-        return tokenPools[token];
-    }
-
-    /**
-     * @notice Gets a user's current share percentage of the ETH pool
-     * @param token Address of the token
-     * @param user Address of the user
-     * @return sharePercentage User's share percentage in basis points (10000 = 100%)
-     */
-    function getETHProviderSharePercentage(
-        address token,
-        address user
-    ) internal view returns (uint256 sharePercentage) {
-        ETHPoolInfo storage pool = ethPools[token];
-        ETHProvider storage provider = ethProviders[token][user];
-
-        if (pool.totalLPShares == 0) {
-            return 0;
-        }
-
-        return (provider.lpShares * 10000) / pool.totalLPShares;
-    }
-
-    /**
-     * @notice Gets a user's current share percentage of the token pool
-     * @param token Address of the token
-     * @param user Address of the user
-     * @return sharePercentage User's share percentage in basis points (10000 = 100%)
-     */
-    function getTokenProviderSharePercentage(
-        address token,
-        address user
-    ) internal view returns (uint256 sharePercentage) {
-        TokenPoolInfo storage pool = tokenPools[token];
-        TokenProvider storage provider = tokenProviders[token][user];
-
-        if (pool.totalLPShares == 0) {
-            return 0;
-        }
-
-        return (provider.lpShares * 10000) / pool.totalLPShares;
-    }
-
-    /**
-     * @notice Gets a user's LP shares for ETH pool
-     * @param token Address of the token
-     * @param user Address of the user
-     * @return lpShares User's LP shares in ETH pool
-     */
-    function getETHProviderLPShares(
-        address token,
-        address user
-    ) external view returns (uint256 lpShares) {
-        return ethProviders[token][user].lpShares;
+        return tokenPools[token][epoch];
     }
 
     /**
      * @notice Gets a user's LP shares for token pool
      * @param token Address of the token
      * @param user Address of the user
+     * @param epoch Epoch to get token provider LP shares for
      * @return lpShares User's LP shares in token pool
      */
     function getTokenProviderLPShares(
         address token,
-        address user
+        address user,
+        uint256 epoch
     ) external view returns (uint256 lpShares) {
-        return tokenProviders[token][user].lpShares;
+        return tokenProviders[token][user][epoch].lpShares;
     }
 
     /**
@@ -889,6 +1110,10 @@ contract GradientMarketMakerPool is
         require(
             address(_gradientRegistry) != address(0),
             "Invalid gradient registry"
+        );
+        emit RegistryUpdated(
+            address(gradientRegistry),
+            address(_gradientRegistry)
         );
         gradientRegistry = _gradientRegistry;
     }
@@ -958,45 +1183,6 @@ contract GradientMarketMakerPool is
         (reserveETH, reserveToken) = token0 == token
             ? (reserve1, reserve0)
             : (reserve0, reserve1);
-    }
-
-    // Legacy interface compatibility - these functions now delegate to the new structure
-    function getPoolInfo(
-        address token
-    ) external view returns (PoolInfo memory) {
-        ETHPoolInfo storage ethPool = ethPools[token];
-        TokenPoolInfo storage tokenPool = tokenPools[token];
-
-        return
-            PoolInfo({
-                totalEth: ethPool.totalETH,
-                totalToken: tokenPool.totalTokens,
-                totalLiquidity: ethPool.totalETH + tokenPool.totalTokens,
-                totalLPShares: ethPool.totalLPShares + tokenPool.totalLPShares,
-                accRewardPerShare: 0, // Not applicable in new structure
-                rewardBalance: ethPool.rewardBalance + tokenPool.rewardBalance,
-                uniswapPair: ethPool.uniswapPair,
-                accountedEth: ethPool.totalETH,
-                accountedToken: tokenPool.totalTokens
-            });
-    }
-
-    function getUserSharePercentage(
-        address token,
-        address user
-    ) external view returns (uint256 sharePercentage) {
-        uint256 ethShare = getETHProviderSharePercentage(token, user);
-        uint256 tokenShare = getTokenProviderSharePercentage(token, user);
-        return ethShare > tokenShare ? ethShare : tokenShare;
-    }
-
-    function getUserLPShares(
-        address token,
-        address user
-    ) external view returns (uint256 lpShares) {
-        return
-            ethProviders[token][user].lpShares +
-            tokenProviders[token][user].lpShares;
     }
 
     /**
@@ -1086,5 +1272,99 @@ contract GradientMarketMakerPool is
         if (currentTokenBalance > totalTokensContributed) {
             excessiveTokens = currentTokenBalance - totalTokensContributed;
         }
+    }
+
+    /**
+     * @notice Check if ETH pool is empty and increment ETH epoch if needed
+     * @param token Address of the token
+     */
+    function _checkAndIncrementETHEpoch(address token) internal {
+        ETHPoolInfo storage ethPool = ethPools[token][currentETHEpochs[token]];
+
+        // Only increment ETH epoch if ETH pool is empty
+        if (ethPool.totalETH == 0) {
+            currentETHEpochs[token]++;
+            emit EpochIncremented(token, currentETHEpochs[token]);
+        }
+    }
+
+    /**
+     * @notice Check if token pool is empty and increment token epoch if needed
+     * @param token Address of the token
+     */
+    function _checkAndIncrementTokenEpoch(address token) internal {
+        TokenPoolInfo storage tokenPool = tokenPools[token][
+            currentTokenEpochs[token]
+        ];
+
+        // Only increment token epoch if token pool is empty
+        if (tokenPool.totalTokens == 0) {
+            currentTokenEpochs[token]++;
+            emit EpochIncremented(token, currentTokenEpochs[token]);
+        }
+    }
+
+    /**
+     * @notice Get current ETH epoch for a token
+     * @param token Address of the token
+     * @return Current ETH epoch number
+     */
+    function getCurrentETHEpoch(address token) external view returns (uint256) {
+        return currentETHEpochs[token];
+    }
+
+    /**
+     * @notice Get current token epoch for a token
+     * @param token Address of the token
+     * @return Current token epoch number
+     */
+    function getCurrentTokenEpoch(
+        address token
+    ) external view returns (uint256) {
+        return currentTokenEpochs[token];
+    }
+
+    /**
+     * @notice Add user to participated epochs if not already present
+     * @param token Address of the token
+     * @param user Address of the user
+     * @param epochId Epoch ID to add
+     * @param isETHEpoch Whether this is an ETH epoch (true) or token epoch (false)
+     */
+    function _addUserToParticipatedEpochs(
+        address token,
+        address user,
+        uint256 epochId,
+        bool isETHEpoch
+    ) internal {
+        uint256[] storage epochs = isETHEpoch
+            ? userParticipatedETHEpochs[token][user]
+            : userParticipatedTokenEpochs[token][user];
+        bool found = false;
+
+        for (uint256 i = 0; i < epochs.length; i++) {
+            if (epochs[i] == epochId) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            epochs.push(epochId);
+        }
+    }
+
+    function getUserParticipatedETHEpochs(
+        address token,
+        address user
+    ) public view returns (uint256[] memory) {
+        return userParticipatedETHEpochs[token][user];
+    }
+
+    function getUserParticipatedTokenEpochs(
+        address token,
+        address user
+    ) public view returns (uint256[] memory) {
+        return userParticipatedTokenEpochs[token][user];
     }
 }

@@ -156,6 +156,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     event FeeDistributedToPool(
         address indexed marketMakerPool,
         address indexed token,
+        uint256 epoch,
         uint256 amount,
         uint256 totalFee
     );
@@ -942,6 +943,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
 
         if (order.orderType == OrderType.Buy) {
+            // Buy order from order to get tokens from market maker pool
+            uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
+                .getCurrentTokenEpoch(order.token);
             // For buy orders: orderbook sends ETH to market maker, receives tokens
             // Execute buy order - Orderbook sends ETH, receives tokens
             IGradientMarketMakerPool(marketMakerPool).executeBuyOrder{
@@ -955,16 +959,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             if (feeForPool > 0) {
                 IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
                     value: feeForPool
-                }(order.token, false); // Distribute to token pool for buy orders
+                }(order.token, epoch, false);
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
+                    epoch,
                     feeForPool,
                     fee
                 );
             }
             IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
         } else {
+            // Sell order from order to get ETH from market maker pool
+            uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
+                .getCurrentETHEpoch(order.token);
             // Approve tokens to market maker pool
             IERC20(order.token).approve(marketMakerPool, actualFillAmount);
 
@@ -985,10 +993,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             if (feeForPool > 0) {
                 IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
                     value: feeForPool
-                }(order.token, true); // Distribute to ETH pool for sell orders
+                }(order.token, epoch, true); // Distribute to ETH pool for sell orders
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
+                    epoch,
                     feeForPool,
                     fee
                 );
