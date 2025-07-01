@@ -1,3 +1,6 @@
 {
-  "MarketMakerPool#GradientMarketMakerPool": "0x7a9B116Ff2a609A7c205928d74661069af75c1d1"
+  "GradientProtocolTestnet#GradientRegistry": "0x72a036f1Bce63E0F89286C4e4e49935551568339",
+  "GradientProtocolTestnet#FallbackExecutor": "0xf0EAEA9147DEd7BD78b54f4b95adffD8aa654b6e",
+  "GradientProtocolTestnet#GradientMarketMakerPool": "0x6c1264A15e1241C7F746E62A3841948E44349946",
+  "GradientProtocolTestnet#GradientOrderbook": "0x05f8B9302028601Fc68C5e80e05a8ae2dfC44514"
 }

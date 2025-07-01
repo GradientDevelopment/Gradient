@@ -94,6 +94,3 @@ The protocol uses a set of interfaces to define the contract functions and ensur
 
 #### External Protocol Interfaces
 *   **`IUniswapV2Router.sol`**, **`IUniswapV2Factory.sol`**, **`IUniswapV2Pair.sol`**: These are standard, well-known interfaces for interacting with the Uniswap V2 ecosystem. They are used by the `GradientMarketMakerPool` to check token reserves for liquidity deposits and by the `fulfillOwnOrderWithAMM` function in the `GradientOrderbook` to perform swaps.
-
-#### General-Purpose & Legacy Interfaces
-*   **`IOrderManager.sol`** and **`IMarketMakerPool.sol`**: These appear to be more generic or potentially older versions of interfaces for an order book and a market maker pool. While not directly implemented by the primary contracts, they exist within the project and may be intended for future modules, alternative implementations, or have been part of a previous design iteration. 
