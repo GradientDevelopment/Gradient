@@ -9,6 +9,9 @@ import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
 import {IGradientMarketMakerPool} from "./interfaces/IGradientMarketMakerPool.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
+import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 
 /**
  * @title GradientOrderbook
@@ -81,9 +84,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Mapping from token pair + order type + execution type hash to array of order IDs
     /// @dev Key is keccak256(abi.encodePacked(token, orderType, executionType))
-    // mapping(bytes32 => uint256[]) private orderQueues;
     mapping(bytes32 => uint256) public totalOrderCount;
-    mapping(bytes32 => mapping(uint256 => uint256)) private orderQueues;
+    mapping(bytes32 => uint256) public headOrder;
+    mapping(bytes32 => uint256) public tailOrder;
+    struct LinkedOrder {
+        uint256 prev;
+        uint256 next;
+        bool exists;
+    }
+    mapping(bytes32 => mapping(uint256 => LinkedOrder)) public linkedOrders;
 
     /// @notice Mapping from order ID to its position in the queue
     /// @dev Used for efficient removal of orders from queues
@@ -98,6 +107,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Percentage of fees distributed to market maker pool (in basis points)
     uint256 public mmFeeDistributionPercentage = 7000; // 70% default
+
+    /// @notice Maximum allowed price deviation from market price (in basis points, 1 = 0.01%)
+    uint256 public maxPriceDeviation = 500; // 5% default
 
     /// @notice Emitted when a new order is created
     event OrderCreated(
@@ -172,6 +184,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 newPercentage
     );
 
+    /// @notice Emitted when max price deviation is updated
+    event MaxPriceDeviationUpdated(uint256 oldDeviation, uint256 newDeviation);
+
     // Modifiers
     modifier onlyAuthorizedFulfiller() {
         require(
@@ -208,86 +223,72 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         maxOrderTtl = 30 days; // Example: 30 days
     }
 
-    /// @notice Sets the fee percentage for trades
-    /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
-    /// @dev Only callable by contract owner
-    function setFeePercentage(uint256 newFeePercentage) external onlyOwner {
-        require(
-            newFeePercentage <= MAX_FEE_PERCENTAGE,
-            "Fee percentage too high"
-        );
-        uint256 oldFeePercentage = feePercentage;
-        feePercentage = newFeePercentage;
-        emit FeePercentageUpdated(oldFeePercentage, newFeePercentage);
+    receive() external payable {}
+
+    fallback() external payable {}
+
+    /// @notice Internal function to calculate and collect fees
+    /// @param amount Amount in ETH to calculate fee from
+    /// @return uint256 Fee amount collected
+    function _collectFee(uint256 amount) internal returns (uint256) {
+        uint256 feeAmount = (amount * feePercentage) / DIVISOR;
+        totalFeesCollected += feeAmount;
+        return feeAmount;
     }
 
-    /**
-     * @notice Sets the gradient registry address
-     * @param _gradientRegistry New gradient registry address
-     * @dev Only callable by the contract owner
-     */
-    function setGradientRegistry(
-        IGradientRegistry _gradientRegistry
-    ) external onlyOwner {
-        require(
-            address(_gradientRegistry) != address(0),
-            "Invalid gradient registry"
-        );
-        gradientRegistry = _gradientRegistry;
-    }
-
-    /// @notice Withdraws collected fees to the specified address
-    /// @param recipient Address to receive the fees
-    /// @dev Only callable by contract owner
-    function withdrawFees(address payable recipient) external onlyOwner {
-        require(recipient != address(0), "Invalid recipient");
-        uint256 amount = totalFeesCollected;
-        require(amount > 0, "No fees to withdraw");
-
-        totalFeesCollected = 0;
-        (bool success, ) = recipient.call{value: amount}("");
-        require(success, "Fee withdrawal failed");
-
-        emit FeesWithdrawn(recipient, amount);
-    }
-
-    /// @notice Generates a unique key for order queues based on token, order type, and execution type
+    /// @notice Adds an order to its appropriate queue
+    /// @param orderId The ID of the order to add
     /// @param token The token address
     /// @param orderType The type of order (Buy/Sell)
     /// @param executionType The type of execution (Limit/Market)
-    /// @return bytes32 A unique key for the order queue
-    function _getQueueKey(
+    function _addOrderToQueue(
+        uint256 orderId,
         address token,
         OrderType orderType,
         OrderExecutionType executionType
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(token, orderType, executionType));
+    ) internal {
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+
+        // new Queue system
+        linkedOrders[queueKey][orderId] = LinkedOrder({
+            prev: tailOrder[queueKey],
+            next: 0,
+            exists: true
+        });
+
+        if (tailOrder[queueKey] != 0) {
+            linkedOrders[queueKey][tailOrder[queueKey]].next = orderId;
+        } else {
+            headOrder[queueKey] = orderId; // First order
+        }
+
+        tailOrder[queueKey] = orderId;
+
+        // Store the position of the order in the queue
+        orderQueuePositions[orderId] = totalOrderCount[queueKey];
+        totalOrderCount[queueKey] += 1;
     }
 
-    /// @notice Sets the minimum and maximum order size limits
-    /// @param _minOrderSize New minimum order size in ETH (wei)
-    /// @param _maxOrderSize New maximum order size in ETH (wei)
-    /// @dev Only callable by contract owner
-    function setOrderSizeLimits(
-        uint256 _minOrderSize,
-        uint256 _maxOrderSize
-    ) external onlyOwner {
-        require(
-            _minOrderSize < _maxOrderSize,
-            "Min size must be less than max size"
-        );
-        minOrderSize = _minOrderSize;
-        maxOrderSize = _maxOrderSize;
-        emit OrderSizeLimitsUpdated(_minOrderSize, _maxOrderSize);
-    }
+    function _removeOrderFromLinkedQueue(
+        bytes32 queueKey,
+        uint256 orderId
+    ) internal {
+        LinkedOrder storage node = linkedOrders[queueKey][orderId];
+        require(node.exists, "Order not in queue");
 
-    /// @notice Sets the maximum time-to-live for orders
-    /// @param _maxOrderTtl New maximum TTL in seconds
-    /// @dev Only callable by contract owner
-    function setMaxOrderTtl(uint256 _maxOrderTtl) external onlyOwner {
-        require(_maxOrderTtl > 0, "TTL must be greater than 0");
-        maxOrderTtl = _maxOrderTtl;
-        emit MaxTTLUpdated(_maxOrderTtl);
+        if (node.prev != 0) {
+            linkedOrders[queueKey][node.prev].next = node.next;
+        } else {
+            headOrder[queueKey] = node.next; // Head being removed
+        }
+
+        if (node.next != 0) {
+            linkedOrders[queueKey][node.next].prev = node.prev;
+        } else {
+            tailOrder[queueKey] = node.prev; // Tail being removed
+        }
+
+        delete linkedOrders[queueKey][orderId];
     }
 
     /// @notice Creates a new order in the orderbook
@@ -313,18 +314,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(ttl > 0, "TTL must be greater than 0");
         require(ttl <= maxOrderTtl, "TTL too long");
 
-        uint256 totalCost = (amount * price) / 1e18;
-        uint256 buyerFee = (totalCost * feePercentage) / DIVISOR;
+        // Normalize token amount to 18 decimals for consistent price calculations
+        uint256 normalizedAmount = normalizeTo18Decimals(amount, token);
+        uint256 totalCost = (normalizedAmount * price) / 1e18;
         require(totalCost >= minOrderSize, "Order too small");
         require(totalCost <= maxOrderSize, "Order too large");
 
         // For buy orders, require ETH payment including potential fee
         if (orderType == OrderType.Buy) {
-            require(msg.value >= totalCost + buyerFee, "Insufficient ETH sent");
-            totalFeesCollected += buyerFee;
-        }
-        // For sell orders, transfer tokens to contract
-        else {
+            require(msg.value >= totalCost, "Insufficient ETH sent");
+        } else {
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
@@ -337,7 +336,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             orderType: orderType,
             executionType: executionType,
             token: token,
-            amount: amount,
+            amount: normalizedAmount, // Store normalized amount for calculations
             price: price,
             filledAmount: 0,
             expirationTime: block.timestamp + ttl,
@@ -355,15 +354,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             orderType,
             executionType,
             token,
-            amount,
+            amount, // Emit original amount for transparency
             price,
             newOrder.expirationTime,
             totalCost
         );
 
         // Return excess ETH for buy orders
-        if (orderType == OrderType.Buy && msg.value > (totalCost + buyerFee)) {
-            uint256 excess = msg.value - (totalCost + buyerFee);
+        if (orderType == OrderType.Buy && msg.value > totalCost) {
+            uint256 excess = msg.value - totalCost;
             (bool success, ) = msg.sender.call{value: excess}("");
             require(success, "ETH return failed");
         }
@@ -388,24 +387,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 remainingAmount = order.amount - order.filledAmount;
             if (remainingAmount > 0) {
                 uint256 refundAmount = (remainingAmount * order.price) / 1e18;
-                uint256 feeRefund = (refundAmount * feePercentage) / DIVISOR;
-                uint256 totalRefund = refundAmount + feeRefund;
-
-                uint256 actualFeeRefund = feeRefund > totalFeesCollected
-                    ? totalFeesCollected
-                    : feeRefund;
-                totalFeesCollected -= actualFeeRefund;
-
-                // Adjust totalRefund if we couldn't refund full fee
-                if (actualFeeRefund < feeRefund) {
-                    totalRefund = refundAmount + actualFeeRefund;
-                }
-
                 require(
-                    address(this).balance >= totalRefund,
+                    address(this).balance >= refundAmount,
                     "Insufficient ETH in contract"
                 );
-                (bool success, ) = order.owner.call{value: totalRefund}("");
+                (bool success, ) = order.owner.call{value: refundAmount}("");
                 require(success, "ETH refund failed");
             }
         }
@@ -413,20 +399,26 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         else {
             uint256 remainingAmount = order.amount - order.filledAmount;
             if (remainingAmount > 0) {
-                IERC20(order.token).safeTransfer(order.owner, remainingAmount);
+                // Denormalize the remaining amount back to token decimals
+                uint256 actualRemainingAmount = denormalizeFrom18Decimals(
+                    remainingAmount,
+                    order.token
+                );
+                IERC20(order.token).safeTransfer(
+                    order.owner,
+                    actualRemainingAmount
+                );
             }
         }
 
-        emit OrderCancelled(orderId);
-    }
+        bytes32 queueKey = _getQueueKey(
+            order.token,
+            order.orderType,
+            order.executionType
+        );
+        _removeOrderFromLinkedQueue(queueKey, orderId);
 
-    /// @notice Checks if an order has expired
-    /// @param orderId ID of the order to check
-    /// @return bool True if the order has expired, false otherwise
-    function isOrderExpired(
-        uint256 orderId
-    ) public view orderExists(orderId) returns (bool) {
-        return block.timestamp > orders[orderId].expirationTime;
+        emit OrderCancelled(orderId);
     }
 
     /// @notice Marks an expired order as expired and handles refunds
@@ -446,28 +438,22 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         if (order.orderType == OrderType.Sell) {
             uint256 remainingAmount = order.amount - order.filledAmount;
             if (remainingAmount > 0) {
-                IERC20(order.token).safeTransfer(order.owner, remainingAmount);
+                // Denormalize the remaining amount back to token decimals
+                uint256 actualRemainingAmount = denormalizeFrom18Decimals(
+                    remainingAmount,
+                    order.token
+                );
+                IERC20(order.token).safeTransfer(
+                    order.owner,
+                    actualRemainingAmount
+                );
             }
         }
 
-        // If it was a buy order, return the ETH including potential fee
         if (order.orderType == OrderType.Buy) {
             uint256 remainingAmount = order.amount - order.filledAmount;
             if (remainingAmount > 0) {
-                uint256 totalCost = (remainingAmount * order.price) / 1e18;
-                uint256 buyerFee = (totalCost * feePercentage) / DIVISOR;
-                uint256 refundAmount = totalCost + buyerFee;
-
-                uint256 actualFeeRefund = buyerFee > totalFeesCollected
-                    ? totalFeesCollected
-                    : buyerFee;
-                totalFeesCollected -= actualFeeRefund;
-
-                // Adjust totalRefund if we couldn't refund full fee
-                if (actualFeeRefund < buyerFee) {
-                    refundAmount = totalCost + actualFeeRefund;
-                }
-
+                uint256 refundAmount = (remainingAmount * order.price) / 1e18;
                 require(
                     address(this).balance >= refundAmount,
                     "Insufficient ETH in contract"
@@ -480,99 +466,14 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             }
         }
 
+        bytes32 queueKey = _getQueueKey(
+            order.token,
+            order.orderType,
+            order.executionType
+        );
+        _removeOrderFromLinkedQueue(queueKey, orderId);
+
         emit OrderExpired(orderId);
-    }
-
-    /// @notice Gets the count of active orders for a given queue
-    /// @param queueKey The queue key to count active orders for
-    /// @return uint256 Number of active orders in the queue
-    function getActiveOrdersCount(
-        bytes32 queueKey
-    ) public view returns (uint256) {
-        // Count active orders
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < totalOrderCount[queueKey]; i++) {
-            uint256 orderId = orderQueues[queueKey][i];
-            if (
-                orders[orderId].status == OrderStatus.Active &&
-                !isOrderExpired(orderId)
-            ) {
-                activeCount++;
-            }
-        }
-        return activeCount;
-    }
-
-    /// @notice Retrieves all active orders for a given token, order type, and execution type
-    /// @param token Address of the token
-    /// @param orderType Type of orders to retrieve (Buy/Sell)
-    /// @param executionType Type of execution (Limit/Market)
-    /// @return uint256[] Array of order IDs that are active and not expired
-    function getActiveOrders(
-        address token,
-        OrderType orderType,
-        OrderExecutionType executionType
-    ) external view returns (uint256[] memory) {
-        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
-
-        uint256 activeCount = getActiveOrdersCount(queueKey);
-        // Create array of active orders
-        uint256 currentIndex = 0;
-        uint256[] memory activeOrders = new uint256[](activeCount);
-        for (
-            uint256 i = 0;
-            i < totalOrderCount[queueKey] && currentIndex < activeCount;
-            i++
-        ) {
-            uint256 orderId = orderQueues[queueKey][i];
-            if (
-                orders[orderId].status == OrderStatus.Active &&
-                !isOrderExpired(orderId)
-            ) {
-                activeOrders[currentIndex] = orderId;
-                currentIndex++;
-            }
-        }
-        return activeOrders;
-    }
-
-    /// @notice Retrieves a paginated list of active orders for a given token, order type, and execution type
-    /// @param token Address of the token
-    /// @param orderType Type of orders to retrieve (Buy/Sell)
-    /// @param executionType Type of execution (Limit/Market)
-    /// @param startIndex Starting index for pagination
-    /// @param count Number of orders to retrieve
-    /// @return uint256[] Array of order IDs that are active and not expired
-    function getActiveOrdersPaged(
-        address token,
-        OrderType orderType,
-        OrderExecutionType executionType,
-        uint256 startIndex,
-        uint256 count
-    ) external view returns (uint256[] memory) {
-        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
-        uint256 total = totalOrderCount[queueKey];
-        uint256[] memory temp = new uint256[](count);
-        uint256 found = 0;
-
-        for (uint256 i = startIndex; i < total && found < count; i++) {
-            uint256 orderId = orderQueues[queueKey][i];
-            if (
-                orders[orderId].status == OrderStatus.Active &&
-                !isOrderExpired(orderId)
-            ) {
-                temp[found] = orderId;
-                found++;
-            }
-        }
-
-        // Resize array to `found`
-        uint256[] memory result = new uint256[](found);
-        for (uint256 i = 0; i < found; i++) {
-            result[i] = temp[i];
-        }
-
-        return result;
     }
 
     /// @notice Fulfills multiple matched limit orders
@@ -609,15 +510,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < matches.length; i++) {
             _fulfillMarketOrders(matches[i], executionPrices[i]);
         }
-    }
-
-    /// @notice Internal function to calculate and collect fees
-    /// @param amount Amount in ETH to calculate fee from
-    /// @return uint256 Fee amount collected
-    function _collectFee(uint256 amount) internal returns (uint256) {
-        uint256 feeAmount = (amount * feePercentage) / DIVISOR;
-        totalFeesCollected += feeAmount;
-        return feeAmount;
     }
 
     /// @notice Internal function to fulfill a matched pair of limit orders
@@ -689,19 +581,34 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18; // Use sell price for limit orders
 
-        // Calculate and collect fees from seller party
+        // Calculate and collect fees from both buyer and seller parties
+        uint256 buyerFee = _collectFee(paymentAmount);
         uint256 sellerFee = _collectFee(paymentAmount);
 
         // Calculate final amounts after fees
         uint256 sellerPayment = paymentAmount - sellerFee;
 
         // Execute transfers
-        // 1. Transfer ETH from contract to seller (minus fee)
+        // 1. Transfer ETH from contract to seller (minus seller fee)
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
         // 2. Transfer traded tokens from contract to buyer
-        IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
+        {
+            uint256 tokenFee = (buyerFee * 1e18) / sellOrder.price;
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                tokenAmount,
+                sellOrder.token
+            );
+            uint256 actualTokenFee = denormalizeFrom18Decimals(
+                tokenFee,
+                sellOrder.token
+            );
+            IERC20(sellOrder.token).safeTransfer(
+                buyOrder.owner,
+                actualTokenAmount - actualTokenFee
+            );
+        }
 
         // Update order states
         buyOrder.filledAmount += actualFillAmount;
@@ -716,73 +623,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
 
         // Update order statuses and remove from queues if fully filled
-        if (buyOrder.filledAmount == buyOrder.amount) {
-            buyOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.buyOrderId,
-                actualFillAmount,
-                buyOrder.amount - buyOrder.filledAmount
-            );
-        }
-
-        if (sellOrder.filledAmount == sellOrder.amount) {
-            sellOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.sellOrderId,
-                actualFillAmount,
-                sellOrder.amount - sellOrder.filledAmount
-            );
-        }
-    }
-
-    /// @notice Retrieves detailed information about an order
-    /// @param orderId ID of the order to query
-    /// @return Order struct containing all order details
-    function getOrder(
-        uint256 orderId
-    ) external view orderExists(orderId) returns (Order memory) {
-        return orders[orderId];
-    }
-
-    /// @notice Gets the unfilled amount for an order
-    /// @param orderId ID of the order to query
-    /// @return uint256 Amount of tokens/ETH remaining to be filled
-    function getRemainingAmount(
-        uint256 orderId
-    ) external view orderExists(orderId) returns (uint256) {
-        Order storage order = orders[orderId];
-        return order.amount - order.filledAmount;
-    }
-
-    /// @notice Allows the contract to receive ETH
-    /// @dev Required for receiving ETH payments
-    receive() external payable {}
-
-    /// @notice Fallback function that accepts ETH
-    /// @dev Required for receiving ETH payments through alternative methods
-    fallback() external payable {}
-
-    /// @notice Adds an order to its appropriate queue
-    /// @param orderId The ID of the order to add
-    /// @param token The token address
-    /// @param orderType The type of order (Buy/Sell)
-    /// @param executionType The type of execution (Limit/Market)
-    function _addOrderToQueue(
-        uint256 orderId,
-        address token,
-        OrderType orderType,
-        OrderExecutionType executionType
-    ) internal {
-        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
-
-        // Store the position of the order in the queue
-        orderQueuePositions[orderId] = totalOrderCount[queueKey];
-        orderQueues[queueKey][totalOrderCount[queueKey]] = orderId;
-        totalOrderCount[queueKey] += 1;
+        _updateOrderStatus(_match.buyOrderId, actualFillAmount);
+        _updateOrderStatus(_match.sellOrderId, actualFillAmount);
     }
 
     /// @notice Internal function to fulfill a matched pair of market orders
@@ -834,6 +676,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         Order storage buyOrder = orders[_match.buyOrderId];
         Order storage sellOrder = orders[_match.sellOrderId];
 
+        // Validate execution price against market price
+        require(
+            validateExecutionPrice(buyOrder.token, executionPrice),
+            "Execution price deviates too much from market price"
+        );
+
         // Validate execution price
         if (buyOrder.executionType == OrderExecutionType.Market) {
             require(
@@ -867,58 +715,42 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
 
-        // Calculate and collect fees from seller party
+        // Calculate and collect fees from both buyer and seller parties
+        uint256 buyerFee = _collectFee(paymentAmount);
         uint256 sellerFee = _collectFee(paymentAmount);
 
         // Calculate final amounts after fees
         uint256 sellerPayment = paymentAmount - sellerFee;
 
         // Execute transfers
-        // 1. Transfer ETH from contract to seller (minus fee)
+        // 1. Transfer ETH from contract to seller (minus seller fee)
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
         // 2. Transfer traded tokens from contract to buyer
-        IERC20(sellOrder.token).safeTransfer(buyOrder.owner, tokenAmount);
+        {
+            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                tokenAmount,
+                sellOrder.token
+            );
+            uint256 actualTokenFee = denormalizeFrom18Decimals(
+                tokenFee,
+                sellOrder.token
+            );
+            IERC20(sellOrder.token).safeTransfer(
+                buyOrder.owner,
+                actualTokenAmount - actualTokenFee
+            );
+        }
 
         // Update order states
         buyOrder.filledAmount += actualFillAmount;
         sellOrder.filledAmount += actualFillAmount;
 
         // Update order statuses and remove from queues if fully filled
-        if (buyOrder.filledAmount == buyOrder.amount) {
-            buyOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.buyOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.buyOrderId,
-                actualFillAmount,
-                buyOrder.amount - buyOrder.filledAmount
-            );
-        }
-
-        if (sellOrder.filledAmount == sellOrder.amount) {
-            sellOrder.status = OrderStatus.Filled;
-            emit OrderFulfilled(_match.sellOrderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                _match.sellOrderId,
-                actualFillAmount,
-                sellOrder.amount - sellOrder.filledAmount
-            );
-        }
-    }
-
-    /// @notice Updates the MM fee distribution percentage
-    /// @param newPercentage New MM fee distribution percentage in basis points
-    /// @dev Only callable by contract owner
-    function updateMMFeeDistributionPercentage(
-        uint256 newPercentage
-    ) external onlyOwner {
-        require(newPercentage <= 10000, "Percentage too high");
-        uint256 oldPercentage = mmFeeDistributionPercentage;
-        mmFeeDistributionPercentage = newPercentage;
-        emit MMFeeDistributionPercentageUpdated(oldPercentage, newPercentage);
+        _updateOrderStatus(_match.buyOrderId, actualFillAmount);
+        _updateOrderStatus(_match.sellOrderId, actualFillAmount);
     }
 
     /// @notice Fulfills multiple orders through the market maker pool
@@ -973,15 +805,19 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             // Buy order from order to get tokens from market maker pool
             uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
                 .getCurrentTokenEpoch(order.token);
+
+            // Collect fee from buyer BEFORE sending ETH to market maker
+            uint256 buyerFee = _collectFee(paymentAmount);
+            uint256 netPaymentAmount = paymentAmount - buyerFee;
+
             // For buy orders: orderbook sends ETH to market maker, receives tokens
-            // Execute buy order - Orderbook sends ETH, receives tokens
             IGradientMarketMakerPool(marketMakerPool).executeBuyOrder{
-                value: paymentAmount
-            }(order.token, paymentAmount, actualFillAmount);
+                value: netPaymentAmount
+            }(order.token, netPaymentAmount, actualFillAmount);
 
             // Distribute market maker fee from already collected fees
-            uint256 fee = (paymentAmount * feePercentage) / DIVISOR;
-            uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
+            uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
+                DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
                 IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
@@ -992,22 +828,44 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                     order.token,
                     epoch,
                     feeForPool,
-                    fee
+                    buyerFee
                 );
             }
-            IERC20(order.token).safeTransfer(order.owner, actualFillAmount);
+
+            // Calculate token fee and deduct from received tokens
+            uint256 tokenFee = (buyerFee * 1e18) / order.price;
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                actualFillAmount,
+                order.token
+            );
+            uint256 actualTokenFee = denormalizeFrom18Decimals(
+                tokenFee,
+                order.token
+            );
+
+            IERC20(order.token).safeTransfer(
+                order.owner,
+                actualTokenAmount - actualTokenFee
+            );
         } else {
             // Sell order from order to get ETH from market maker pool
             uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
                 .getCurrentETHEpoch(order.token);
+
+            // Denormalize the amount for token approval
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                actualFillAmount,
+                order.token
+            );
+
             // Approve tokens to market maker pool
-            IERC20(order.token).approve(marketMakerPool, actualFillAmount);
+            IERC20(order.token).approve(marketMakerPool, actualTokenAmount);
 
             // Execute sell order - Orderbook sends tokens, receives ETH
             IGradientMarketMakerPool(marketMakerPool).executeSellOrder(
                 order.token,
                 paymentAmount,
-                actualFillAmount
+                actualTokenAmount
             );
 
             // Collect fee from ETH received
@@ -1039,16 +897,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         order.filledAmount += actualFillAmount;
 
         // Update order status
-        if (order.filledAmount == order.amount) {
-            order.status = OrderStatus.Filled;
-            emit OrderFulfilled(orderId, actualFillAmount);
-        } else {
-            emit OrderPartiallyFulfilled(
-                orderId,
-                actualFillAmount,
-                order.amount - order.filledAmount
-            );
-        }
+        _updateOrderStatus(orderId, actualFillAmount);
 
         emit OrderFulfilledByMarketMaker(
             orderId,
@@ -1090,6 +939,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Execute trade through FallbackExecutor
         if (order.orderType == OrderType.Buy) {
+            // Calculate and collect buyer fee from deposited ETH
+            uint256 buyerFee = _collectFee(paymentAmount);
+
             // Execute the buy trade directly through FallbackExecutor
             uint256 tokensReceived = IFallbackExecutor(fallbackExecutor)
                 .executeTrade{value: paymentAmount}(
@@ -1099,17 +951,31 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 true // isBuy = true
             );
 
-            // Transfer all received tokens to order owner
-            IERC20(order.token).safeTransfer(order.owner, tokensReceived);
+            // Calculate token fee and deduct from received tokens
+            uint256 tokenFee = (buyerFee * 1e18) / order.price;
+            uint256 actualTokenFee = denormalizeFrom18Decimals(
+                tokenFee,
+                order.token
+            );
+            IERC20(order.token).safeTransfer(
+                order.owner,
+                tokensReceived - actualTokenFee
+            );
         } else {
+            // Denormalize the amount for token approval and transfer
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                actualFillAmount,
+                order.token
+            );
+
             // Approve tokens to FallbackExecutor
-            IERC20(order.token).approve(fallbackExecutor, actualFillAmount);
+            IERC20(order.token).approve(fallbackExecutor, actualTokenAmount);
 
             // Execute the sell trade
             uint256 ethReceived = IFallbackExecutor(fallbackExecutor)
                 .executeTrade(
                     order.token,
-                    actualFillAmount,
+                    actualTokenAmount,
                     minAmountOut,
                     false // isBuy = false
                 );
@@ -1124,8 +990,26 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         order.filledAmount += actualFillAmount;
 
         // Update order status
+        _updateOrderStatus(orderId, actualFillAmount);
+    }
+
+    /// @notice Internal function to update order status
+    /// @param orderId ID of the order to update
+    /// @param actualFillAmount Amount of tokens/ETH that was filled
+    function _updateOrderStatus(
+        uint256 orderId,
+        uint256 actualFillAmount
+    ) internal {
+        Order storage order = orders[orderId];
         if (order.filledAmount == order.amount) {
             order.status = OrderStatus.Filled;
+            bytes32 queueKey = _getQueueKey(
+                order.token,
+                order.orderType,
+                order.executionType
+            );
+            _removeOrderFromLinkedQueue(queueKey, orderId);
+
             emit OrderFulfilled(orderId, actualFillAmount);
         } else {
             emit OrderPartiallyFulfilled(
@@ -1134,5 +1018,344 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 order.amount - order.filledAmount
             );
         }
+    }
+
+    // ========================== View Functions ==========================
+
+    /// @notice Helper function to get token decimals
+    /// @param token The token address
+    /// @return uint8 The number of decimals for the token
+    function getTokenDecimals(address token) internal view returns (uint8) {
+        return IERC20Metadata(token).decimals();
+    }
+
+    /// @notice Helper function to normalize token amount to 18 decimals
+    /// @param amount The token amount in its native decimals
+    /// @param token The token address
+    /// @return uint256 The normalized amount in 18 decimals
+    function normalizeTo18Decimals(
+        uint256 amount,
+        address token
+    ) internal view returns (uint256) {
+        uint8 decimals = getTokenDecimals(token);
+        if (decimals == 18) {
+            return amount;
+        } else if (decimals < 18) {
+            return amount * (10 ** (18 - decimals));
+        } else {
+            return amount / (10 ** (decimals - 18));
+        }
+    }
+
+    /// @notice Helper function to denormalize from 18 decimals to token decimals
+    /// @param amount The amount in 18 decimals
+    /// @param token The token address
+    /// @return uint256 The denormalized amount in token decimals
+    function denormalizeFrom18Decimals(
+        uint256 amount,
+        address token
+    ) internal view returns (uint256) {
+        uint8 decimals = getTokenDecimals(token);
+        if (decimals == 18) {
+            return amount;
+        } else if (decimals < 18) {
+            return amount / (10 ** (18 - decimals));
+        } else {
+            return amount * (10 ** (decimals - 18));
+        }
+    }
+
+    /// @notice Gets the count of active orders for a given queue
+    /// @param queueKey The queue key to count active orders for
+    /// @return uint256 Number of active orders in the queue
+    function getActiveOrdersCount(
+        bytes32 queueKey
+    ) public view returns (uint256) {
+        uint256 activeCount = 0;
+        uint256 currentOrderId = headOrder[queueKey];
+
+        while (currentOrderId != 0) {
+            Order storage order = orders[currentOrderId];
+            if (
+                order.status == OrderStatus.Active &&
+                !isOrderExpired(currentOrderId)
+            ) {
+                activeCount++;
+            }
+
+            currentOrderId = linkedOrders[queueKey][currentOrderId].next;
+        }
+
+        return activeCount;
+    }
+
+    /// @notice Retrieves all active orders for a given token, order type, and execution type
+    /// @param token Address of the token
+    /// @param orderType Type of orders to retrieve (Buy/Sell)
+    /// @param executionType Type of execution (Limit/Market)
+    /// @return uint256[] Array of order IDs that are active and not expired
+    function getActiveOrders(
+        address token,
+        OrderType orderType,
+        OrderExecutionType executionType
+    ) external view returns (uint256[] memory) {
+        bytes32 queueKey = _getQueueKey(token, orderType, executionType);
+
+        uint256 activeCount = getActiveOrdersCount(queueKey);
+
+        // Create array of active orders
+        uint256[] memory activeOrders = new uint256[](activeCount);
+        uint256 currentOrderId = headOrder[queueKey];
+        uint256 currentIndex = 0;
+
+        while (currentOrderId != 0 && currentIndex < activeCount) {
+            Order storage order = orders[currentOrderId];
+            if (
+                order.status == OrderStatus.Active &&
+                !isOrderExpired(currentOrderId)
+            ) {
+                activeOrders[currentIndex] = currentOrderId;
+                currentIndex++;
+            }
+
+            currentOrderId = linkedOrders[queueKey][currentOrderId].next;
+        }
+
+        return activeOrders;
+    }
+
+    /// @notice Generates a unique key for order queues based on token, order type, and execution type
+    /// @param token The token address
+    /// @param orderType The type of order (Buy/Sell)
+    /// @param executionType The type of execution (Limit/Market)
+    /// @return bytes32 A unique key for the order queue
+    function _getQueueKey(
+        address token,
+        OrderType orderType,
+        OrderExecutionType executionType
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(token, orderType, executionType));
+    }
+
+    /// @notice Checks if an order has expired
+    /// @param orderId ID of the order to check
+    /// @return bool True if the order has expired, false otherwise
+    function isOrderExpired(
+        uint256 orderId
+    ) public view orderExists(orderId) returns (bool) {
+        return block.timestamp > orders[orderId].expirationTime;
+    }
+
+    /// @notice Retrieves detailed information about an order
+    /// @param orderId ID of the order to query
+    /// @return Order struct containing all order details
+    function getOrder(
+        uint256 orderId
+    ) external view orderExists(orderId) returns (Order memory) {
+        return orders[orderId];
+    }
+
+    /// @notice Gets the unfilled amount for an order
+    /// @param orderId ID of the order to query
+    /// @return uint256 Amount of tokens/ETH remaining to be filled
+    function getRemainingAmount(
+        uint256 orderId
+    ) external view orderExists(orderId) returns (uint256) {
+        Order storage order = orders[orderId];
+        return order.amount - order.filledAmount;
+    }
+
+    // ========================== Admin Functions ==========================
+
+    /// @notice Sets the fee percentage for trades
+    /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
+    /// @dev Only callable by contract owner
+    function setFeePercentage(uint256 newFeePercentage) external onlyOwner {
+        require(
+            newFeePercentage <= MAX_FEE_PERCENTAGE,
+            "Fee percentage too high"
+        );
+        uint256 oldFeePercentage = feePercentage;
+        feePercentage = newFeePercentage;
+        emit FeePercentageUpdated(oldFeePercentage, newFeePercentage);
+    }
+
+    /**
+     * @notice Sets the gradient registry address
+     * @param _gradientRegistry New gradient registry address
+     * @dev Only callable by the contract owner
+     */
+    function setGradientRegistry(
+        IGradientRegistry _gradientRegistry
+    ) external onlyOwner {
+        require(
+            address(_gradientRegistry) != address(0),
+            "Invalid gradient registry"
+        );
+        gradientRegistry = _gradientRegistry;
+    }
+
+    /// @notice Withdraws collected fees to the specified address
+    /// @param recipient Address to receive the fees
+    /// @dev Only callable by contract owner
+    function withdrawFees(address payable recipient) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        uint256 amount = totalFeesCollected;
+        require(amount > 0, "No fees to withdraw");
+
+        totalFeesCollected = 0;
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Fee withdrawal failed");
+
+        emit FeesWithdrawn(recipient, amount);
+    }
+
+    /// @notice Sets the minimum and maximum order size limits
+    /// @param _minOrderSize New minimum order size in ETH (wei)
+    /// @param _maxOrderSize New maximum order size in ETH (wei)
+    /// @dev Only callable by contract owner
+    function setOrderSizeLimits(
+        uint256 _minOrderSize,
+        uint256 _maxOrderSize
+    ) external onlyOwner {
+        require(
+            _minOrderSize < _maxOrderSize,
+            "Min size must be less than max size"
+        );
+        minOrderSize = _minOrderSize;
+        maxOrderSize = _maxOrderSize;
+        emit OrderSizeLimitsUpdated(_minOrderSize, _maxOrderSize);
+    }
+
+    /// @notice Sets the maximum time-to-live for orders
+    /// @param _maxOrderTtl New maximum TTL in seconds
+    /// @dev Only callable by contract owner
+    function setMaxOrderTtl(uint256 _maxOrderTtl) external onlyOwner {
+        require(_maxOrderTtl > 0, "TTL must be greater than 0");
+        maxOrderTtl = _maxOrderTtl;
+        emit MaxTTLUpdated(_maxOrderTtl);
+    }
+
+    /// @notice Updates the MM fee distribution percentage
+    /// @param newPercentage New MM fee distribution percentage in basis points
+    /// @dev Only callable by contract owner
+    function updateMMFeeDistributionPercentage(
+        uint256 newPercentage
+    ) external onlyOwner {
+        require(newPercentage <= 10000, "Percentage too high");
+        uint256 oldPercentage = mmFeeDistributionPercentage;
+        mmFeeDistributionPercentage = newPercentage;
+        emit MMFeeDistributionPercentageUpdated(oldPercentage, newPercentage);
+    }
+
+    /// @notice Gets the current market price from Uniswap for a token
+    /// @param token Address of the token
+    /// @return marketPrice Current market price in ETH (18 decimals)
+    function getCurrentMarketPrice(
+        address token
+    ) public view returns (uint256 marketPrice) {
+        address routerAddress = gradientRegistry.router();
+        require(routerAddress != address(0), "Router not set");
+
+        // Get reserves from the pair
+        (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
+        require(reserveETH > 0 && reserveToken > 0, "Insufficient liquidity");
+
+        // Calculate price: ETH per token (18 decimals)
+        // Price = (reserveETH * 1e18) / reserveToken
+        marketPrice = (reserveETH * 1e18) / reserveToken;
+
+        // Ensure we have a reasonable price (not zero or extremely small)
+        require(marketPrice > 0, "Invalid market price calculated");
+
+        return marketPrice;
+    }
+
+    /// @notice Validates execution price against current market price
+    /// @param token Address of the token
+    /// @param executionPrice Execution price to validate
+    /// @return bool True if price is within acceptable deviation
+    function validateExecutionPrice(
+        address token,
+        uint256 executionPrice
+    ) public view returns (bool) {
+        uint256 marketPrice = getCurrentMarketPrice(token);
+
+        // Handle edge cases
+        if (marketPrice == 0) {
+            return false; // Cannot validate against zero market price
+        }
+
+        if (executionPrice == marketPrice) {
+            return true; // Exact match is always valid
+        }
+
+        // Calculate price deviation with improved precision
+        uint256 deviation;
+        if (executionPrice > marketPrice) {
+            // Calculate percentage above market price
+            // deviation = ((executionPrice - marketPrice) * 10000) / marketPrice
+            uint256 priceDifference = executionPrice - marketPrice;
+
+            // Check for overflow in multiplication
+            require(
+                priceDifference <= type(uint256).max / 10000,
+                "Price difference too large"
+            );
+
+            deviation = (priceDifference * 10000) / marketPrice;
+        } else {
+            // Calculate percentage below market price
+            // deviation = ((marketPrice - executionPrice) * 10000) / marketPrice
+            uint256 priceDifference = marketPrice - executionPrice;
+
+            // Check for overflow in multiplication
+            require(
+                priceDifference <= type(uint256).max / 10000,
+                "Price difference too large"
+            );
+
+            deviation = (priceDifference * 10000) / marketPrice;
+        }
+
+        return deviation <= maxPriceDeviation;
+    }
+
+    /// @notice Gets the reserves for a token pair from Uniswap
+    /// @param token Address of the token
+    /// @return reserveETH ETH reserve amount
+    /// @return reserveToken Token reserve amount
+    function getReserves(
+        address token
+    ) public view returns (uint256 reserveETH, uint256 reserveToken) {
+        address routerAddress = gradientRegistry.router();
+        require(routerAddress != address(0), "Router not set");
+
+        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
+        address factory = router.factory();
+        address weth = router.WETH();
+
+        // Get pair address
+        address pairAddress = IUniswapV2Factory(factory).getPair(token, weth);
+        require(pairAddress != address(0), "Pair does not exist");
+
+        // Get reserves
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
+            .getReserves();
+        address token0 = IUniswapV2Pair(pairAddress).token0();
+
+        (reserveETH, reserveToken) = token0 == token
+            ? (reserve1, reserve0)
+            : (reserve0, reserve1);
+    }
+
+    /// @notice Updates the maximum allowed price deviation from market price
+    /// @param newDeviation New maximum price deviation in basis points (1 = 0.01%)
+    /// @dev Only callable by contract owner
+    function updateMaxPriceDeviation(uint256 newDeviation) external onlyOwner {
+        require(newDeviation <= 10000, "Deviation too high");
+        uint256 oldDeviation = maxPriceDeviation;
+        maxPriceDeviation = newDeviation;
+        emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);
     }
 }

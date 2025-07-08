@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 /// @title GradientOrderbook
 /// @notice A decentralized orderbook for trading ERC20 tokens against ETH
 /// @dev Implements a limit order system with order matching and fulfillment
-contract GradientOrderbook is Ownable, ReentrancyGuard {
+contract GradientOrderbookV2 is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Types of orders that can be placed

@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
  * @title GradientRegistry
  * @notice Central registry for storing and managing Gradient protocol contract addresses
- * @dev This contract acts as a central point for contract address management and access control
+ * @dev This contract uses role-based access control to reduce centralization risk
  */
-contract GradientRegistry is Ownable {
+contract GradientRegistry is AccessControl {
+    // Role definitions
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+
     // Contract addresses
     address public marketMakerPool;
     address public gradientToken;
-    address public feeCollector;
     address public orderbook;
     address public fallbackExecutor;
     address public router; // Uniswap V2 Router address
@@ -20,12 +23,6 @@ contract GradientRegistry is Ownable {
     // Mapping for blocked tokens
     mapping(address => bool) public blockedTokens;
     mapping(address => bool) public isRewardDistributor;
-
-    // Mapping for additional contracts that might be added later
-    mapping(bytes32 => address) public additionalContracts;
-
-    // Access control for contracts that can call certain functions
-    mapping(address => bool) public authorizedContracts;
 
     // Mapping for authorized fulfillers
     mapping(address => bool) public authorizedFulfillers;
@@ -36,21 +33,21 @@ contract GradientRegistry is Ownable {
         address indexed oldAddress,
         address indexed newAddress
     );
-    event AdditionalContractSet(
-        bytes32 indexed key,
-        address indexed contractAddress
-    );
-    event ContractAuthorized(address indexed contractAddress, bool authorized);
     event RewardDistributorSet(address indexed rewardDistributor);
+    event RewardDistributorRemoved(address indexed rewardDistributor);
     event FulfillerAuthorized(address indexed fulfiller, bool status);
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address _admin) {
+        // Set up roles
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(ADMIN_ROLE, _admin);
+        _grantRole(OPERATOR_ROLE, _admin);
+    }
 
     /**
      * @notice Set the main contract addresses
      * @param _marketMakerPool Address of the MarketMakerPool contract
      * @param _gradientToken Address of the Gradient token contract
-     * @param _feeCollector Address of the fee collector contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
@@ -58,11 +55,22 @@ contract GradientRegistry is Ownable {
     function setMainContracts(
         address _marketMakerPool,
         address _gradientToken,
-        address _feeCollector,
         address _orderbook,
         address _fallbackExecutor,
         address _router
-    ) external onlyOwner {
+    ) external onlyRole(ADMIN_ROLE) {
+        require(
+            _marketMakerPool != address(0),
+            "Invalid market maker pool address"
+        );
+        require(_gradientToken != address(0), "Invalid gradient token address");
+        require(_orderbook != address(0), "Invalid orderbook address");
+        require(
+            _fallbackExecutor != address(0),
+            "Invalid fallback executor address"
+        );
+        require(_router != address(0), "Invalid router address");
+
         emit ContractAddressUpdated(
             "MarketMakerPool",
             marketMakerPool,
@@ -73,11 +81,7 @@ contract GradientRegistry is Ownable {
             gradientToken,
             _gradientToken
         );
-        emit ContractAddressUpdated(
-            "FeeCollector",
-            feeCollector,
-            _feeCollector
-        );
+
         emit ContractAddressUpdated("Orderbook", orderbook, _orderbook);
         emit ContractAddressUpdated(
             "FallbackExecutor",
@@ -88,7 +92,6 @@ contract GradientRegistry is Ownable {
 
         marketMakerPool = _marketMakerPool;
         gradientToken = _gradientToken;
-        feeCollector = _feeCollector;
         orderbook = _orderbook;
         fallbackExecutor = _fallbackExecutor;
         router = _router;
@@ -102,7 +105,7 @@ contract GradientRegistry is Ownable {
     function setTokenBlockStatus(
         address token,
         bool blocked
-    ) external onlyOwner {
+    ) external onlyRole(OPERATOR_ROLE) {
         blockedTokens[token] = blocked;
     }
 
@@ -113,10 +116,18 @@ contract GradientRegistry is Ownable {
      */
     function setRewardDistributor(
         address rewardDistributor
-    ) external onlyOwner {
+    ) external onlyRole(ADMIN_ROLE) {
         require(rewardDistributor != address(0), "Invalid distributor address");
         isRewardDistributor[rewardDistributor] = true;
         emit RewardDistributorSet(rewardDistributor);
+    }
+
+    function removeRewardDistributor(
+        address rewardDistributor
+    ) external onlyRole(ADMIN_ROLE) {
+        require(rewardDistributor != address(0), "Invalid distributor address");
+        isRewardDistributor[rewardDistributor] = false;
+        emit RewardDistributorRemoved(rewardDistributor);
     }
 
     /**
@@ -127,7 +138,7 @@ contract GradientRegistry is Ownable {
     function setContractAddress(
         string calldata contractName,
         address newAddress
-    ) external onlyOwner {
+    ) external onlyRole(OPERATOR_ROLE) {
         require(newAddress != address(0), "Invalid address");
 
         bytes32 nameHash = keccak256(bytes(contractName));
@@ -139,9 +150,6 @@ contract GradientRegistry is Ownable {
         } else if (nameHash == keccak256(bytes("GradientToken"))) {
             oldAddress = gradientToken;
             gradientToken = newAddress;
-        } else if (nameHash == keccak256(bytes("FeeCollector"))) {
-            oldAddress = feeCollector;
-            feeCollector = newAddress;
         } else if (nameHash == keccak256(bytes("Orderbook"))) {
             oldAddress = orderbook;
             orderbook = newAddress;
@@ -159,51 +167,9 @@ contract GradientRegistry is Ownable {
     }
 
     /**
-     * @notice Set an additional contract address using a key
-     * @param key The key to identify the contract
-     * @param contractAddress The address of the contract
-     */
-    function setAdditionalContract(
-        bytes32 key,
-        address contractAddress
-    ) external onlyOwner {
-        require(contractAddress != address(0), "Invalid address");
-        require(key != bytes32(0), "Invalid key");
-
-        additionalContracts[key] = contractAddress;
-        emit AdditionalContractSet(key, contractAddress);
-    }
-
-    /**
-     * @notice Authorize or deauthorize a contract
-     * @param contractAddress The address of the contract
-     * @param authorized Whether the contract should be authorized
-     */
-    function setContractAuthorization(
-        address contractAddress,
-        bool authorized
-    ) external onlyOwner {
-        require(contractAddress != address(0), "Invalid address");
-        authorizedContracts[contractAddress] = authorized;
-        emit ContractAuthorized(contractAddress, authorized);
-    }
-
-    /**
-     * @notice Check if a contract is authorized
-     * @param contractAddress The address to check
-     * @return bool Whether the contract is authorized
-     */
-    function isContractAuthorized(
-        address contractAddress
-    ) external view returns (bool) {
-        return authorizedContracts[contractAddress];
-    }
-
-    /**
      * @notice Get all main contract addresses
      * @return _marketMakerPool Address of the MarketMakerPool contract
      * @return _gradientToken Address of the Gradient token contract
-     * @return _feeCollector Address of the fee collector contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
      * @return _router Address of the Uniswap V2 Router contract
@@ -214,7 +180,6 @@ contract GradientRegistry is Ownable {
         returns (
             address _marketMakerPool,
             address _gradientToken,
-            address _feeCollector,
             address _orderbook,
             address _fallbackExecutor,
             address _router
@@ -223,19 +188,10 @@ contract GradientRegistry is Ownable {
         return (
             marketMakerPool,
             gradientToken,
-            feeCollector,
             orderbook,
             fallbackExecutor,
             router
         );
-    }
-
-    /**
-     * @notice Modifier to check if caller is an authorized contract
-     */
-    modifier onlyAuthorized() {
-        require(authorizedContracts[msg.sender], "Not authorized");
-        _;
     }
 
     /**
@@ -270,7 +226,7 @@ contract GradientRegistry is Ownable {
     function authorizeFulfiller(
         address fulfiller,
         bool status
-    ) external onlyOwner {
+    ) external onlyRole(ADMIN_ROLE) {
         require(fulfiller != address(0), "Invalid fulfiller address");
         authorizedFulfillers[fulfiller] = status;
         emit FulfillerAuthorized(fulfiller, status);
@@ -285,5 +241,41 @@ contract GradientRegistry is Ownable {
         address fulfiller
     ) external view returns (bool) {
         return authorizedFulfillers[fulfiller];
+    }
+
+    /**
+     * @notice Grant role to address
+     * @param role Role to grant
+     * @param account Account to grant role to
+     */
+    function grantRole(
+        bytes32 role,
+        address account
+    ) public override onlyRole(DEFAULT_ADMIN_ROLE) {
+        super.grantRole(role, account);
+    }
+
+    /**
+     * @notice Revoke role from address
+     * @param role Role to revoke
+     * @param account Account to revoke role from
+     */
+    function revokeRole(
+        bytes32 role,
+        address account
+    ) public override onlyRole(DEFAULT_ADMIN_ROLE) {
+        super.revokeRole(role, account);
+    }
+
+    /**
+     * @notice Renounce role
+     * @param role Role to renounce
+     * @param account Account to renounce role from
+     */
+    function renounceRole(
+        bytes32 role,
+        address account
+    ) public override onlyRole(DEFAULT_ADMIN_ROLE) {
+        super.renounceRole(role, account);
     }
 }

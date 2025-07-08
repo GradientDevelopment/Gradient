@@ -59,6 +59,17 @@ contract GradientMarketMakerPool is
     mapping(address => uint256) public totalTokensAdded; // Total tokens added across all pools (per token)
     mapping(address => uint256) public totalTokensRemoved; // Total tokens removed across all pools (per token)
 
+    // Gas limit protection for batch operations
+    uint256 public constant MAX_BATCH_SIZE = 20; // Maximum items per batch
+    uint256 public constant GAS_LIMIT_PER_ITEM = 50000; // Estimated gas per removal operation
+    uint256 public constant GAS_BUFFER = 100000; // Gas buffer for safety
+
+    event BatchRemovalCompleted(
+        address indexed user,
+        address indexed token,
+        uint256 totalProcessed
+    );
+
     modifier isNotBlocked(address token) {
         require(!gradientRegistry.blockedTokens(token), "Token is blocked");
         _;
@@ -451,6 +462,17 @@ contract GradientMarketMakerPool is
             "Invalid token epochs length"
         );
 
+        uint256 totalItems = ethEpochs.length + tokenEpochs.length;
+        require(totalItems <= MAX_BATCH_SIZE, "Batch size too large");
+
+        // Check gas limit
+        uint256 estimatedGas = totalItems * GAS_LIMIT_PER_ITEM + GAS_BUFFER;
+        require(
+            gasleft() >= estimatedGas,
+            "Insufficient gas for batch operation"
+        );
+
+        // Process ETH epochs
         for (uint256 i = 0; i < ethEpochs.length; i++) {
             require(
                 ethShares[i] > 0 && ethShares[i] <= 10000,
@@ -481,6 +503,8 @@ contract GradientMarketMakerPool is
                 tokenEpochs[i]
             );
         }
+
+        emit BatchRemovalCompleted(msg.sender, token, totalItems);
     }
 
     /**
@@ -526,6 +550,14 @@ contract GradientMarketMakerPool is
                 epochs.length == minEthAmounts.length,
             "Invalid epochs length"
         );
+        require(epochs.length <= MAX_BATCH_SIZE, "Batch size too large");
+
+        // Check gas limit
+        uint256 estimatedGas = epochs.length * GAS_LIMIT_PER_ITEM + GAS_BUFFER;
+        require(
+            gasleft() >= estimatedGas,
+            "Insufficient gas for batch operation"
+        );
 
         for (uint256 i = 0; i < epochs.length; i++) {
             require(
@@ -536,6 +568,8 @@ contract GradientMarketMakerPool is
 
             _removeETHLiquidity(token, shares[i], minEthAmounts[i], epochs[i]);
         }
+
+        emit BatchRemovalCompleted(msg.sender, token, epochs.length);
     }
 
     /**
@@ -638,6 +672,7 @@ contract GradientMarketMakerPool is
         if (provider.pendingTokenReward > 0) {
             uint256 tokenRewards = provider.pendingTokenReward;
             provider.pendingTokenReward = 0;
+            totalTokensRemoved[token] += tokenRewards;
             IERC20(token).safeTransfer(msg.sender, tokenRewards);
 
             emit PoolSharesClaimed(
@@ -680,6 +715,14 @@ contract GradientMarketMakerPool is
                 epochs.length == minTokenAmounts.length,
             "Invalid epochs length"
         );
+        require(epochs.length <= MAX_BATCH_SIZE, "Batch size too large");
+
+        // Check gas limit
+        uint256 estimatedGas = epochs.length * GAS_LIMIT_PER_ITEM + GAS_BUFFER;
+        require(
+            gasleft() >= estimatedGas,
+            "Insufficient gas for batch operation"
+        );
 
         for (uint256 i = 0; i < epochs.length; i++) {
             require(
@@ -694,6 +737,8 @@ contract GradientMarketMakerPool is
                 epochs[i]
             );
         }
+
+        emit BatchRemovalCompleted(msg.sender, token, epochs.length);
     }
 
     /**
@@ -798,6 +843,7 @@ contract GradientMarketMakerPool is
         if (provider.pendingETHReward > 0) {
             uint256 ethRewards = provider.pendingETHReward;
             provider.pendingETHReward = 0;
+            totalEthRemoved += ethRewards;
             (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
             require(success, "ETH reward transfer failed");
 
@@ -842,6 +888,7 @@ contract GradientMarketMakerPool is
 
         // Token pool provides tokens to orderbook
         tokenPool.totalTokens -= tokenAmount;
+        totalEthAdded += msg.value;
         totalTokensRemoved[token] += tokenAmount;
         // Token pool receives ETH rewards for providing tokens
         _updateTokenPoolETHRewards(token, ethAmount);
@@ -886,6 +933,7 @@ contract GradientMarketMakerPool is
         // ETH pool provides ETH to orderbook
         ethPool.totalETH -= ethAmount;
         totalEthRemoved += ethAmount;
+        totalTokensAdded[token] += tokenAmount;
 
         // ETH pool receives token rewards for providing ETH
         _updateETHPoolTokenRewards(token, tokenAmount);
@@ -917,7 +965,7 @@ contract GradientMarketMakerPool is
         bool isETHPool
     ) external payable onlyRewardDistributor {
         require(msg.value > 0, "No ETH sent");
-
+        totalEthAdded += msg.value;
         if (isETHPool) {
             ETHPoolInfo storage pool = ethPools[token][epoch];
             require(pool.totalLPShares > 0, "No ETH liquidity");
@@ -946,7 +994,7 @@ contract GradientMarketMakerPool is
             if (isETHPool) {
                 _claimEthPoolFee(token, epochs[i]);
             } else {
-                _claimTokenPoolFee(token, epochs[i]);
+                _claimEthFeeFromTokenPool(token, epochs[i]);
             }
         }
     }
@@ -984,21 +1032,21 @@ contract GradientMarketMakerPool is
 
         provider.rewardDebt = accumulated;
         provider.pendingReward = 0;
-
+        totalEthRemoved += reward;
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit PoolFeeClaimed(msg.sender, reward, token, epoch, false);
+        emit FeeClaimedFromEthPool(msg.sender, reward, token, epoch);
     }
 
     /// @notice Claim token rewards for token providers
     /// @param token Address of the token pool to claim rewards from
     /// @param epoch Epoch to claim rewards from
-    function claimTokenPoolFee(
+    function claimEthFeeFromTokenPool(
         address token,
         uint256 epoch
     ) external nonReentrant {
-        _claimTokenPoolFee(token, epoch);
+        _claimEthFeeFromTokenPool(token, epoch);
     }
 
     /**
@@ -1006,7 +1054,7 @@ contract GradientMarketMakerPool is
      * @param token Address of the token pool to claim rewards from
      * @param epoch Epoch to claim rewards from
      */
-    function _claimTokenPoolFee(address token, uint256 epoch) internal {
+    function _claimEthFeeFromTokenPool(address token, uint256 epoch) internal {
         TokenPoolInfo storage pool = tokenPools[token][epoch];
         TokenProvider storage provider = tokenProviders[token][msg.sender][
             epoch
@@ -1025,11 +1073,11 @@ contract GradientMarketMakerPool is
 
         provider.rewardDebt = accumulated;
         provider.pendingReward = 0;
-
+        totalEthRemoved += reward;
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit PoolFeeClaimed(msg.sender, reward, token, epoch, false);
+        emit EthFeeClaimedFromTokenPool(msg.sender, reward, token, epoch);
     }
 
     /**
@@ -1204,21 +1252,6 @@ contract GradientMarketMakerPool is
             excessiveEth = currentEthBalance - totalEthContributed;
         }
 
-        // Calculate excessive tokens (overall contract balance)
-        uint256 currentTokenBalance = IERC20(token).balanceOf(address(this));
-        uint256 totalTokensContributed = totalTokensAdded[token] -
-            totalTokensRemoved[token];
-        uint256 excessiveTokens = 0;
-
-        if (currentTokenBalance > totalTokensContributed) {
-            excessiveTokens = currentTokenBalance - totalTokensContributed;
-        }
-
-        require(
-            excessiveEth > 0 || excessiveTokens > 0,
-            "No excessive funds to withdraw"
-        );
-
         // Withdraw excessive ETH
         if (excessiveEth > 0) {
             (bool success, ) = owner().call{value: excessiveEth}("");
@@ -1232,6 +1265,21 @@ contract GradientMarketMakerPool is
             );
         }
 
+        if (token == address(0)) {
+            require(excessiveEth > 0, "No excessive ETH to withdraw");
+            return;
+        }
+
+        // Calculate excessive tokens (overall contract balance)
+        uint256 currentTokenBalance = IERC20(token).balanceOf(address(this));
+        uint256 totalTokensContributed = totalTokensAdded[token] -
+            totalTokensRemoved[token];
+        uint256 excessiveTokens = 0;
+
+        if (currentTokenBalance > totalTokensContributed) {
+            excessiveTokens = currentTokenBalance - totalTokensContributed;
+        }
+
         // Withdraw excessive tokens
         if (excessiveTokens > 0) {
             IERC20(token).safeTransfer(owner(), excessiveTokens);
@@ -1243,6 +1291,11 @@ contract GradientMarketMakerPool is
                 "Excessive tokens"
             );
         }
+
+        require(
+            excessiveEth > 0 || excessiveTokens > 0,
+            "No excessive funds to withdraw"
+        );
     }
 
     /**

@@ -87,12 +87,18 @@ interface IGradientMarketMakerPool {
         bool isETH
     );
 
-    event PoolFeeClaimed(
+    event FeeClaimedFromEthPool(
         address indexed user,
         uint256 amount,
         address token,
-        uint256 epoch,
-        bool isETH
+        uint256 epoch
+    );
+
+    event EthFeeClaimedFromTokenPool(
+        address indexed user,
+        uint256 amount,
+        address token,
+        uint256 epoch
     );
 
     event PoolSharesClaimed(
@@ -232,7 +238,7 @@ interface IGradientMarketMakerPool {
      * @param token Address of the token pool to claim rewards from
      * @param epoch Epoch to claim rewards from
      */
-    function claimTokenPoolFee(address token, uint256 epoch) external;
+    function claimEthFeeFromTokenPool(address token, uint256 epoch) external;
 
     /**
      * @notice Gets ETH pool information for a specific token and epoch

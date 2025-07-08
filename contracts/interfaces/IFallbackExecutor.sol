@@ -19,7 +19,6 @@ interface IFallbackExecutor {
         uint256 amountOut,
         bool isBuy
     );
-    event SlippageUpdated(uint256 newSlippage);
 
     // View functions
     function dexes(
@@ -36,13 +35,12 @@ interface IFallbackExecutor {
 
     function gradientRegistry() external view returns (address);
 
+    function getActiveDEXes() external view returns (address[] memory);
+
+    function getDEXConfig(address dex) external view returns (DEXConfig memory);
+
     // State changing functions
-    function addDEX(
-        address dex,
-        address router,
-        address factory,
-        uint256 priority
-    ) external;
+    function addDEX(address dex, address router, uint256 priority) external;
 
     function removeDEX(address dex) external;
 
@@ -52,4 +50,8 @@ interface IFallbackExecutor {
         uint256 minAmountOut,
         bool isBuy
     ) external payable returns (uint256 amountOut);
+
+    function emergencyWithdraw(address[] calldata tokens) external;
+
+    function emergencyWithdrawETH() external;
 }

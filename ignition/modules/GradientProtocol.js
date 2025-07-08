@@ -7,7 +7,7 @@ const {
 module.exports = buildModule("GradientProtocol", (m) => {
   // 1. Deploy GradientRegistry first (central registry)
   const deployer = m.getAccount(0); // Automatically gets the first signer
-  const gradientRegistry = m.contract("GradientRegistry", [], {});
+  const gradientRegistry = m.contract("GradientRegistry", [deployer], {});
 
   // 2. Deploy GradientMarketMakerPool (depends on registry)
   const gradientMarketMakerPool = m.contract(
@@ -34,18 +34,13 @@ module.exports = buildModule("GradientProtocol", (m) => {
   m.call(gradientRegistry, "setMainContracts", [
     gradientMarketMakerPool, // marketMakerPool
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
-    deployer, // feeCollector (placeholder)
     gradientOrderbook, // orderbook
     fallbackExecutor, // fallbackExecutor
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router (mainnet)
   ]);
 
   // 6. Set up initial configurations
-  // Set orderbook as authorized contract in registry
-  m.call(gradientRegistry, "setContractAuthorization", [
-    gradientOrderbook,
-    true,
-  ]);
+  // Note: setContractAuthorization was removed - roles are now managed through AccessControl
 
   // 7. Configure orderbook settings
   // Set initial fee percentage (0.5% = 50 basis points)
