@@ -36,10 +36,15 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
 
     uint256 public maxDEXs = 5;
     uint256 public constant MAX_DEADLINE = 300; // 5 minutes
+    uint256 public minLiquidityThreshold = 10 ether; // Minimum liquidity in ETH equivalent
 
     // Events
     event DEXAdded(address indexed dex, address router, address factory);
     event DEXRemoved(address indexed dex);
+    event MinLiquidityThresholdUpdated(
+        uint256 oldThreshold,
+        uint256 newThreshold
+    );
     event TradeExecuted(
         address indexed token,
         address indexed dex,
@@ -47,6 +52,15 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         uint256 amountOut,
         bool isBuy
     );
+
+    // Modifiers
+    modifier onlyOrderbook() {
+        require(
+            msg.sender == gradientRegistry.orderbook(),
+            "FallbackExecutor: Only orderbook can call"
+        );
+        _;
+    }
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
@@ -107,19 +121,36 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
     }
 
     /**
+     * @notice Set the minimum liquidity threshold to protect against price manipulation
+     * @param newThreshold The new minimum liquidity threshold in ETH equivalent
+     * @dev Only callable by contract owner
+     * @dev Higher thresholds provide better protection but may exclude more DEXes
+     */
+    function setMinLiquidityThreshold(uint256 newThreshold) external onlyOwner {
+        require(newThreshold > 0, "Threshold must be greater than 0");
+        require(newThreshold <= 1000 ether, "Threshold too high"); // Reasonable upper limit
+
+        uint256 oldThreshold = minLiquidityThreshold;
+        minLiquidityThreshold = newThreshold;
+
+        emit MinLiquidityThresholdUpdated(oldThreshold, newThreshold);
+    }
+
+    /**
      * @notice Execute a trade through the best available DEX
      * @param token The token to trade
      * @param amount The amount to trade
      * @param minAmountOut Minimum amount to receive
      * @param isBuy Whether this is a buy or sell order
      * @return amountOut The actual amount received from the trade
+     * @dev Only callable by the orderbook contract to prevent fee bypass
      */
     function executeTrade(
         address token,
         uint256 amount,
         uint256 minAmountOut,
         bool isBuy
-    ) external payable nonReentrant returns (uint256 amountOut) {
+    ) external payable onlyOrderbook nonReentrant returns (uint256 amountOut) {
         require(token != address(0), "Invalid token");
         require(amount > 0, "Amount must be greater than 0");
         require(minAmountOut > 0, "Invalid minAmountOut");
@@ -267,7 +298,12 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         uint256 tokenReserve = token < weth ? reserve0 : reserve1;
         uint256 ethReserve = token < weth ? reserve1 : reserve0;
 
-        // Ensure sufficient liquidity with safety margin
+        // Check minimum liquidity threshold (protects against flash loan attacks)
+        if (ethReserve < minLiquidityThreshold) {
+            return false;
+        }
+
+        // Ensure sufficient liquidity with safety margin for the specific trade
         if (isBuy) {
             return ethReserve >= (amount * 11) / 10; // 10% safety margin
         } else {

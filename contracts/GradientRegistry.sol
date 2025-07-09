@@ -6,12 +6,13 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /**
  * @title GradientRegistry
  * @notice Central registry for storing and managing Gradient protocol contract addresses
- * @dev This contract uses role-based access control to reduce centralization risk
+ * @dev This contract uses role-based access control and timelock to reduce centralization risk
  */
 contract GradientRegistry is AccessControl {
     // Role definitions
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 public constant TIMELOCK_ROLE = keccak256("TIMELOCK_ROLE");
 
     // Contract addresses
     address public marketMakerPool;
@@ -19,6 +20,12 @@ contract GradientRegistry is AccessControl {
     address public orderbook;
     address public fallbackExecutor;
     address public router; // Uniswap V2 Router address
+
+    // Timelock configuration
+    uint256 public timelockDuration = 24 hours;
+    mapping(bytes32 => uint256) public pendingChanges;
+    mapping(bytes32 => bool) public executedChanges;
+    mapping(string => bool) public isInitialized; // Track if each contract has been initialized
 
     // Mapping for blocked tokens
     mapping(address => bool) public blockedTokens;
@@ -36,21 +43,207 @@ contract GradientRegistry is AccessControl {
     event RewardDistributorSet(address indexed rewardDistributor);
     event RewardDistributorRemoved(address indexed rewardDistributor);
     event FulfillerAuthorized(address indexed fulfiller, bool status);
+    event RegistryChangeScheduled(
+        string indexed contractName,
+        address indexed newAddress,
+        bytes32 indexed changeId,
+        uint256 executionTime
+    );
+    event RegistryChangeExecuted(bytes32 indexed changeId);
+    event RegistryChangeCancelled(bytes32 indexed changeId);
+    event TimelockDurationUpdated(uint256 oldDuration, uint256 newDuration);
 
     constructor(address _admin) {
         // Set up roles
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
         _grantRole(OPERATOR_ROLE, _admin);
+        _grantRole(TIMELOCK_ROLE, _admin);
     }
 
     /**
-     * @notice Set the main contract addresses
+     * @notice Schedule a registry change with timelock
+     * @param contractName Name of the contract to update
+     * @param newAddress New address for the contract
+     * @dev Only callable by ADMIN_ROLE, requires timelock delay
+     */
+    function scheduleContractAddressChange(
+        string calldata contractName,
+        address newAddress
+    ) external onlyRole(ADMIN_ROLE) {
+        require(newAddress != address(0), "Invalid address");
+        require(
+            bytes(contractName).length > 0,
+            "Contract name cannot be empty"
+        );
+
+        // If this is the first time setting this contract, allow immediate execution
+        if (!isInitialized[contractName]) {
+            _executeContractAddressChange(contractName, newAddress);
+            isInitialized[contractName] = true;
+            return;
+        }
+
+        // For subsequent changes, require timelock
+        bytes32 changeId = keccak256(
+            abi.encodePacked(contractName, newAddress, block.timestamp)
+        );
+        require(pendingChanges[changeId] == 0, "Change already scheduled");
+
+        uint256 executionTime = block.timestamp + timelockDuration;
+        pendingChanges[changeId] = executionTime;
+
+        emit RegistryChangeScheduled(
+            contractName,
+            newAddress,
+            changeId,
+            executionTime
+        );
+    }
+
+    /**
+     * @notice Execute a scheduled registry change after timelock expires
+     * @param contractName Name of the contract to update
+     * @param newAddress New address for the contract
+     * @param timestamp Timestamp when the change was scheduled
+     * @dev Only callable by TIMELOCK_ROLE after delay expires
+     */
+    function executeContractAddressChange(
+        string calldata contractName,
+        address newAddress,
+        uint256 timestamp
+    ) external onlyRole(TIMELOCK_ROLE) {
+        bytes32 changeId = keccak256(
+            abi.encodePacked(contractName, newAddress, timestamp)
+        );
+
+        require(pendingChanges[changeId] > 0, "No pending change found");
+        require(!executedChanges[changeId], "Change already executed");
+        require(
+            block.timestamp >= pendingChanges[changeId],
+            "Timelock not expired"
+        );
+        require(
+            block.timestamp <= pendingChanges[changeId] + 24 hours,
+            "Execution window expired"
+        );
+
+        executedChanges[changeId] = true;
+        delete pendingChanges[changeId];
+
+        _executeContractAddressChange(contractName, newAddress);
+        emit RegistryChangeExecuted(changeId);
+    }
+
+    /**
+     * @notice Internal function to execute contract address changes
+     * @param contractName Name of the contract to update
+     * @param newAddress New address for the contract
+     */
+    function _executeContractAddressChange(
+        string calldata contractName,
+        address newAddress
+    ) internal {
+        bytes32 nameHash = keccak256(bytes(contractName));
+        address oldAddress;
+
+        if (nameHash == keccak256(bytes("MarketMakerPool"))) {
+            oldAddress = marketMakerPool;
+            marketMakerPool = newAddress;
+        } else if (nameHash == keccak256(bytes("GradientToken"))) {
+            oldAddress = gradientToken;
+            gradientToken = newAddress;
+        } else if (nameHash == keccak256(bytes("Orderbook"))) {
+            oldAddress = orderbook;
+            orderbook = newAddress;
+        } else if (nameHash == keccak256(bytes("FallbackExecutor"))) {
+            oldAddress = fallbackExecutor;
+            fallbackExecutor = newAddress;
+        } else if (nameHash == keccak256(bytes("Router"))) {
+            oldAddress = router;
+            router = newAddress;
+        } else {
+            revert("Invalid contract name");
+        }
+
+        emit ContractAddressUpdated(contractName, oldAddress, newAddress);
+    }
+
+    /**
+     * @notice Cancel a scheduled registry change (emergency only)
+     * @param contractName Name of the contract
+     * @param newAddress New address for the contract
+     * @param timestamp Timestamp when the change was scheduled
+     * @dev Only callable by ADMIN_ROLE
+     */
+    function cancelContractAddressChange(
+        string calldata contractName,
+        address newAddress,
+        uint256 timestamp
+    ) external onlyRole(ADMIN_ROLE) {
+        bytes32 changeId = keccak256(
+            abi.encodePacked(contractName, newAddress, timestamp)
+        );
+
+        require(pendingChanges[changeId] > 0, "No pending change found");
+        require(!executedChanges[changeId], "Change already executed");
+
+        delete pendingChanges[changeId];
+        emit RegistryChangeCancelled(changeId);
+    }
+
+    /**
+     * @notice Check if a scheduled change is ready for execution
+     * @param contractName Name of the contract
+     * @param newAddress New address for the contract
+     * @param timestamp Timestamp when the change was scheduled
+     * @return ready Whether the change is ready for execution
+     * @return executionTime When the change can be executed
+     */
+    function isChangeReady(
+        string calldata contractName,
+        address newAddress,
+        uint256 timestamp
+    ) external view returns (bool ready, uint256 executionTime) {
+        bytes32 changeId = keccak256(
+            abi.encodePacked(contractName, newAddress, timestamp)
+        );
+        executionTime = pendingChanges[changeId];
+
+        if (executionTime == 0 || executedChanges[changeId]) {
+            return (false, 0);
+        }
+
+        ready =
+            block.timestamp >= executionTime &&
+            block.timestamp <= executionTime + 24 hours;
+    }
+
+    /**
+     * @notice Update the timelock duration
+     * @param newDuration New timelock duration in seconds
+     * @dev Only callable by ADMIN_ROLE, requires minimum duration
+     */
+    function updateTimelockDuration(
+        uint256 newDuration
+    ) external onlyRole(ADMIN_ROLE) {
+        require(newDuration >= 2 hours, "Duration too short");
+        require(newDuration <= 7 days, "Duration too long");
+
+        uint256 oldDuration = timelockDuration;
+        timelockDuration = newDuration;
+
+        emit TimelockDurationUpdated(oldDuration, newDuration);
+    }
+
+    /**
+     * @notice Set the main contract addresses (legacy function, requires timelock)
      * @param _marketMakerPool Address of the MarketMakerPool contract
      * @param _gradientToken Address of the Gradient token contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
+     * @dev This function now schedules changes instead of executing immediately
      */
     function setMainContracts(
         address _marketMakerPool,
@@ -71,30 +264,15 @@ contract GradientRegistry is AccessControl {
         );
         require(_router != address(0), "Invalid router address");
 
-        emit ContractAddressUpdated(
-            "MarketMakerPool",
-            marketMakerPool,
-            _marketMakerPool
-        );
-        emit ContractAddressUpdated(
-            "GradientToken",
-            gradientToken,
-            _gradientToken
-        );
-
-        emit ContractAddressUpdated("Orderbook", orderbook, _orderbook);
-        emit ContractAddressUpdated(
+        // Set each contract address (first-time setup will be immediate)
+        this.scheduleContractAddressChange("MarketMakerPool", _marketMakerPool);
+        this.scheduleContractAddressChange("GradientToken", _gradientToken);
+        this.scheduleContractAddressChange("Orderbook", _orderbook);
+        this.scheduleContractAddressChange(
             "FallbackExecutor",
-            fallbackExecutor,
             _fallbackExecutor
         );
-        emit ContractAddressUpdated("Router", router, _router);
-
-        marketMakerPool = _marketMakerPool;
-        gradientToken = _gradientToken;
-        orderbook = _orderbook;
-        fallbackExecutor = _fallbackExecutor;
-        router = _router;
+        this.scheduleContractAddressChange("Router", _router);
     }
 
     /**
@@ -131,39 +309,16 @@ contract GradientRegistry is AccessControl {
     }
 
     /**
-     * @notice Set an individual main contract address
+     * @notice Set an individual main contract address (first-time setup is immediate, subsequent changes require timelock)
      * @param contractName Name of the contract to update
      * @param newAddress New address for the contract
+     * @dev First-time setup is immediate, subsequent changes require timelock
      */
     function setContractAddress(
         string calldata contractName,
         address newAddress
     ) external onlyRole(OPERATOR_ROLE) {
-        require(newAddress != address(0), "Invalid address");
-
-        bytes32 nameHash = keccak256(bytes(contractName));
-        address oldAddress;
-
-        if (nameHash == keccak256(bytes("MarketMakerPool"))) {
-            oldAddress = marketMakerPool;
-            marketMakerPool = newAddress;
-        } else if (nameHash == keccak256(bytes("GradientToken"))) {
-            oldAddress = gradientToken;
-            gradientToken = newAddress;
-        } else if (nameHash == keccak256(bytes("Orderbook"))) {
-            oldAddress = orderbook;
-            orderbook = newAddress;
-        } else if (nameHash == keccak256(bytes("FallbackExecutor"))) {
-            oldAddress = fallbackExecutor;
-            fallbackExecutor = newAddress;
-        } else if (nameHash == keccak256(bytes("Router"))) {
-            oldAddress = router;
-            router = newAddress;
-        } else {
-            revert("Invalid contract name");
-        }
-
-        emit ContractAddressUpdated(contractName, oldAddress, newAddress);
+        this.scheduleContractAddressChange(contractName, newAddress);
     }
 
     /**

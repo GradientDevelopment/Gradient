@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -64,6 +65,18 @@ contract GradientMarketMakerPool is
     uint256 public constant GAS_LIMIT_PER_ITEM = 50000; // Estimated gas per removal operation
     uint256 public constant GAS_BUFFER = 100000; // Gas buffer for safety
 
+    // Epoch manipulation protection
+    // token => last ETH epoch increment timestamp
+    mapping(address => uint256) public lastETHEpochIncrementTime;
+    // token => last token epoch increment timestamp
+    mapping(address => uint256) public lastTokenEpochIncrementTime;
+
+    // Minimum time between epoch increments (cooldown period)
+    uint256 public epochCooldownPeriod = 1 hours; // Default: 1 hour cooldown
+
+    // Minimum liquidity thresholds for epoch progression
+    uint256 public minLiquidityForEpochProgression = 1e16; // 0.01 ETH minimum
+
     event BatchRemovalCompleted(
         address indexed user,
         address indexed token,
@@ -99,6 +112,8 @@ contract GradientMarketMakerPool is
      * @notice Receive ETH for reward distribution
      */
     receive() external payable {}
+
+    // =============================== INTERNAL FUNCTIONS ===============================
 
     /**
      * @notice Calculate LP shares using a more secure formula to prevent precision loss
@@ -238,6 +253,96 @@ contract GradientMarketMakerPool is
     }
 
     /**
+     * @notice Check if ETH pool is empty and finalize ETH epoch if needed
+     * @param token Address of the token
+     */
+    function _checkAndIncrementETHEpoch(address token) internal {
+        ETHPoolInfo storage ethPool = ethPools[token][currentETHEpochs[token]];
+
+        // Finalize ETH epoch when pool becomes empty (don't increment yet)
+        if (ethPool.totalETH == 0 && !ethPool.finalized) {
+            ethPool.finalized = true;
+            lastETHEpochIncrementTime[token] = block.timestamp;
+            emit EpochFinalized(token, currentETHEpochs[token], true);
+        }
+    }
+
+    /**
+     * @notice Check if token pool is empty and finalize token epoch if needed
+     * @param token Address of the token
+     */
+    function _checkAndIncrementTokenEpoch(address token) internal {
+        TokenPoolInfo storage tokenPool = tokenPools[token][
+            currentTokenEpochs[token]
+        ];
+
+        // Finalize token epoch when pool becomes empty (don't increment yet)
+        if (tokenPool.totalTokens == 0 && !tokenPool.finalized) {
+            tokenPool.finalized = true;
+            lastTokenEpochIncrementTime[token] = block.timestamp;
+            emit EpochFinalized(token, currentTokenEpochs[token], false);
+        }
+    }
+
+    /**
+     * @notice Calculate withdrawal amount with proper validation
+     * @param sharesToBurn Number of shares being burned
+     * @param totalAmount Total amount in pool
+     * @param totalShares Total shares in pool
+     * @return withdrawalAmount Amount to withdraw
+     */
+    function _calculateWithdrawalAmount(
+        uint256 sharesToBurn,
+        uint256 totalAmount,
+        uint256 totalShares
+    ) internal pure returns (uint256 withdrawalAmount) {
+        require(sharesToBurn > 0, "Shares to burn must be greater than 0");
+        require(totalShares > 0, "Total shares must be greater than 0");
+
+        // Calculate withdrawal amount proportionally
+        withdrawalAmount = (sharesToBurn * totalAmount) / totalShares;
+
+        require(
+            withdrawalAmount <= totalAmount,
+            "Withdrawal amount exceeds pool balance"
+        );
+
+        return withdrawalAmount;
+    }
+
+    /**
+     * @notice Add user to participated epochs if not already present
+     * @param token Address of the token
+     * @param user Address of the user
+     * @param epochId Epoch ID to add
+     * @param isETHEpoch Whether this is an ETH epoch (true) or token epoch (false)
+     */
+    function _addUserToParticipatedEpochs(
+        address token,
+        address user,
+        uint256 epochId,
+        bool isETHEpoch
+    ) internal {
+        uint256[] storage epochs = isETHEpoch
+            ? userParticipatedETHEpochs[token][user]
+            : userParticipatedTokenEpochs[token][user];
+        bool found = false;
+
+        for (uint256 i = 0; i < epochs.length; i++) {
+            if (epochs[i] == epochId) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            epochs.push(epochId);
+        }
+    }
+
+    // =============================== PUBLIC FUNCTIONS ===============================
+
+    /**
      * @notice Add liquidity to the pool
      * @param token Address of the token to provide liquidity for
      * @param tokenAmount Amount of tokens to deposit
@@ -274,6 +379,24 @@ contract GradientMarketMakerPool is
      * @param ethAmount Amount of ETH to deposit
      */
     function _addETHLiquidity(address token, uint256 ethAmount) internal {
+        // Check if current epoch is finalized and apply cooldown restrictions
+        if (ethPools[token][currentETHEpochs[token]].finalized) {
+            // Check cooldown period for finalized epochs
+            require(
+                block.timestamp >=
+                    lastETHEpochIncrementTime[token] + epochCooldownPeriod,
+                "ETH epoch cooldown period not met"
+            );
+
+            // Check minimum liquidity threshold for new epochs
+            require(
+                ethAmount >= minLiquidityForEpochProgression,
+                "Insufficient liquidity for new epoch"
+            );
+
+            // Increment to next epoch since cooldown period has passed
+            currentETHEpochs[token]++;
+        }
         ETHPoolInfo storage pool = ethPools[token][currentETHEpochs[token]];
 
         if (pool.uniswapPair == address(0)) {
@@ -363,6 +486,30 @@ contract GradientMarketMakerPool is
         TokenPoolInfo storage pool = tokenPools[token][
             currentTokenEpochs[token]
         ];
+
+        // Check if current epoch is finalized and apply cooldown restrictions
+        if (pool.finalized) {
+            // Check cooldown period for finalized epochs
+            require(
+                block.timestamp >=
+                    lastTokenEpochIncrementTime[token] + epochCooldownPeriod,
+                "Token epoch cooldown period not met"
+            );
+
+            // Check minimum liquidity threshold for new epochs (using ETH equivalent)
+            uint256 tokenEthEquivalent = _calculateTokenEthEquivalent(
+                token,
+                tokenAmount
+            );
+            require(
+                tokenEthEquivalent >= minLiquidityForEpochProgression,
+                "Insufficient token liquidity for new epoch"
+            );
+
+            // Increment to next epoch since cooldown period has passed
+            currentTokenEpochs[token]++;
+            pool = tokenPools[token][currentTokenEpochs[token]]; // Get the new epoch pool
+        }
 
         if (pool.uniswapPair == address(0)) {
             pool.uniswapPair = getPairAddress(token);
@@ -746,6 +893,7 @@ contract GradientMarketMakerPool is
      * @param token Address of the token to withdraw from
      * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
      * @param minTokenAmount Minimum amount of tokens to receive
+     * @param epoch Epoch to remove liquidity from
      */
     function removeTokenLiquidity(
         address token,
@@ -1080,72 +1228,7 @@ contract GradientMarketMakerPool is
         emit EthFeeClaimedFromTokenPool(msg.sender, reward, token, epoch);
     }
 
-    /**
-     * @notice Calculate withdrawal amount with proper validation
-     * @param sharesToBurn Number of shares being burned
-     * @param totalAmount Total amount in pool
-     * @param totalShares Total shares in pool
-     * @return withdrawalAmount Amount to withdraw
-     */
-    function _calculateWithdrawalAmount(
-        uint256 sharesToBurn,
-        uint256 totalAmount,
-        uint256 totalShares
-    ) internal pure returns (uint256 withdrawalAmount) {
-        require(sharesToBurn > 0, "Shares to burn must be greater than 0");
-        require(totalShares > 0, "Total shares must be greater than 0");
-
-        // Calculate withdrawal amount proportionally
-        withdrawalAmount = (sharesToBurn * totalAmount) / totalShares;
-
-        require(
-            withdrawalAmount <= totalAmount,
-            "Withdrawal amount exceeds pool balance"
-        );
-
-        return withdrawalAmount;
-    }
-
-    /**
-     * @notice Gets ETH pool information for a specific token
-     * @param token Address of the token to get ETH pool info for
-     * @param epoch Epoch to get ETH pool info for
-     * @return ETHPoolInfo struct containing ETH pool details
-     */
-    function getETHPoolInfo(
-        address token,
-        uint256 epoch
-    ) external view returns (ETHPoolInfo memory) {
-        return ethPools[token][epoch];
-    }
-
-    /**
-     * @notice Gets token pool information for a specific token
-     * @param token Address of the token to get token pool info for
-     * @param epoch Epoch to get token pool info for
-     * @return TokenPoolInfo struct containing token pool details
-     */
-    function getTokenPoolInfo(
-        address token,
-        uint256 epoch
-    ) external view returns (TokenPoolInfo memory) {
-        return tokenPools[token][epoch];
-    }
-
-    /**
-     * @notice Gets a user's LP shares for token pool
-     * @param token Address of the token
-     * @param user Address of the user
-     * @param epoch Epoch to get token provider LP shares for
-     * @return lpShares User's LP shares in token pool
-     */
-    function getTokenProviderLPShares(
-        address token,
-        address user,
-        uint256 epoch
-    ) external view returns (uint256 lpShares) {
-        return tokenProviders[token][user][epoch].lpShares;
-    }
+    // =============================== OWNER FUNCTIONS ===============================
 
     /**
      * @notice Sets the gradient registry address
@@ -1191,46 +1274,6 @@ contract GradientMarketMakerPool is
         );
         minTokenLiquidity = _minTokenLiquidity;
         emit MinTokenLiquidityUpdated(_minTokenLiquidity);
-    }
-
-    /**
-     * @notice Get the Uniswap V2 pair address for a given token
-     * @param token Address of the token
-     * @return pairAddress Address of the Uniswap V2 pair
-     */
-    function getPairAddress(
-        address token
-    ) public view returns (address pairAddress) {
-        address routerAddress = gradientRegistry.router();
-        require(routerAddress != address(0), "Router not set");
-
-        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        address factory = router.factory();
-        address weth = router.WETH();
-
-        IUniswapV2Factory factoryContract = IUniswapV2Factory(factory);
-        return factoryContract.getPair(token, weth);
-    }
-
-    /**
-     * @notice Get the reserves for a token pair
-     * @param token Address of the token
-     * @return reserveETH ETH reserve amount
-     * @return reserveToken Token reserve amount
-     */
-    function getReserves(
-        address token
-    ) public view returns (uint256 reserveETH, uint256 reserveToken) {
-        address pairAddress = getPairAddress(token);
-        require(pairAddress != address(0), "Pair does not exist");
-
-        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
-            .getReserves();
-        address token0 = IUniswapV2Pair(pairAddress).token0();
-
-        (reserveETH, reserveToken) = token0 == token
-            ? (reserve1, reserve0)
-            : (reserve0, reserve1);
     }
 
     /**
@@ -1299,112 +1342,83 @@ contract GradientMarketMakerPool is
     }
 
     /**
-     * @notice Get excessive funds information for a token
-     * @param token Address of the token
-     * @return excessiveEth Amount of excessive ETH
-     * @return excessiveTokens Amount of excessive tokens
+     * @notice Set epoch cooldown period to prevent attacks
+     * @param _epochCooldownPeriod New cooldown period in seconds
+     * @dev Only callable by contract owner
      */
-    function getExcessiveFunds(
+    function setEpochCooldownPeriod(
+        uint256 _epochCooldownPeriod
+    ) external onlyOwner {
+        require(
+            _epochCooldownPeriod >= 1 hours,
+            "Cooldown period must be at least 1 hour"
+        );
+        require(
+            _epochCooldownPeriod <= 24 hours,
+            "Cooldown period cannot exceed 24 hours"
+        );
+        epochCooldownPeriod = _epochCooldownPeriod;
+        emit EpochCooldownPeriodUpdated(_epochCooldownPeriod);
+    }
+
+    /**
+     * @notice Set minimum ETH liquidity required for epoch progression
+     * @param _minLiquidityForEpochProgression New minimum ETH liquidity amount
+     * @dev Only callable by contract owner
+     */
+    function setMinLiquidityForEpochProgression(
+        uint256 _minLiquidityForEpochProgression
+    ) external onlyOwner {
+        require(
+            _minLiquidityForEpochProgression > 0,
+            "Minimum liquidity must be greater than 0"
+        );
+        minLiquidityForEpochProgression = _minLiquidityForEpochProgression;
+        emit MinLiquidityForEpochProgressionUpdated(
+            _minLiquidityForEpochProgression
+        );
+    }
+
+    // =============================== VIEW FUNCTIONS ===============================
+
+    /**
+     * @notice Get the Uniswap V2 pair address for a given token
+     * @param token Address of the token
+     * @return pairAddress Address of the Uniswap V2 pair
+     */
+    function getPairAddress(
         address token
-    ) external view returns (uint256 excessiveEth, uint256 excessiveTokens) {
-        require(token != address(0), "Invalid token address");
+    ) public view returns (address pairAddress) {
+        address routerAddress = gradientRegistry.router();
+        require(routerAddress != address(0), "Router not set");
 
-        // Calculate excessive ETH (overall contract balance)
-        uint256 currentEthBalance = address(this).balance;
-        uint256 totalEthContributed = totalEthAdded - totalEthRemoved;
+        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
+        address factory = router.factory();
+        address weth = router.WETH();
 
-        if (currentEthBalance > totalEthContributed) {
-            excessiveEth = currentEthBalance - totalEthContributed;
-        }
-
-        // Calculate excessive tokens (overall contract balance)
-        uint256 currentTokenBalance = IERC20(token).balanceOf(address(this));
-        uint256 totalTokensContributed = totalTokensAdded[token] -
-            totalTokensRemoved[token];
-
-        if (currentTokenBalance > totalTokensContributed) {
-            excessiveTokens = currentTokenBalance - totalTokensContributed;
-        }
+        IUniswapV2Factory factoryContract = IUniswapV2Factory(factory);
+        return factoryContract.getPair(token, weth);
     }
 
     /**
-     * @notice Check if ETH pool is empty and increment ETH epoch if needed
+     * @notice Get the reserves for a token pair
      * @param token Address of the token
+     * @return reserveETH ETH reserve amount
+     * @return reserveToken Token reserve amount
      */
-    function _checkAndIncrementETHEpoch(address token) internal {
-        ETHPoolInfo storage ethPool = ethPools[token][currentETHEpochs[token]];
-
-        // Only increment ETH epoch if ETH pool is empty
-        if (ethPool.totalETH == 0) {
-            currentETHEpochs[token]++;
-            emit EpochIncremented(token, currentETHEpochs[token]);
-        }
-    }
-
-    /**
-     * @notice Check if token pool is empty and increment token epoch if needed
-     * @param token Address of the token
-     */
-    function _checkAndIncrementTokenEpoch(address token) internal {
-        TokenPoolInfo storage tokenPool = tokenPools[token][
-            currentTokenEpochs[token]
-        ];
-
-        // Only increment token epoch if token pool is empty
-        if (tokenPool.totalTokens == 0) {
-            currentTokenEpochs[token]++;
-            emit EpochIncremented(token, currentTokenEpochs[token]);
-        }
-    }
-
-    /**
-     * @notice Get current ETH epoch for a token
-     * @param token Address of the token
-     * @return Current ETH epoch number
-     */
-    function getCurrentETHEpoch(address token) external view returns (uint256) {
-        return currentETHEpochs[token];
-    }
-
-    /**
-     * @notice Get current token epoch for a token
-     * @param token Address of the token
-     * @return Current token epoch number
-     */
-    function getCurrentTokenEpoch(
+    function getReserves(
         address token
-    ) external view returns (uint256) {
-        return currentTokenEpochs[token];
-    }
+    ) public view returns (uint256 reserveETH, uint256 reserveToken) {
+        address pairAddress = getPairAddress(token);
+        require(pairAddress != address(0), "Pair does not exist");
 
-    /**
-     * @notice Add user to participated epochs if not already present
-     * @param token Address of the token
-     * @param user Address of the user
-     * @param epochId Epoch ID to add
-     * @param isETHEpoch Whether this is an ETH epoch (true) or token epoch (false)
-     */
-    function _addUserToParticipatedEpochs(
-        address token,
-        address user,
-        uint256 epochId,
-        bool isETHEpoch
-    ) internal {
-        uint256[] storage epochs = isETHEpoch
-            ? userParticipatedETHEpochs[token][user]
-            : userParticipatedTokenEpochs[token][user];
-        bool found = false;
+        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
+            .getReserves();
+        address token0 = IUniswapV2Pair(pairAddress).token0();
 
-        for (uint256 i = 0; i < epochs.length; i++) {
-            if (epochs[i] == epochId) {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            epochs.push(epochId);
-        }
+        (reserveETH, reserveToken) = token0 == token
+            ? (reserve1, reserve0)
+            : (reserve0, reserve1);
     }
 
     function getUserParticipatedETHEpochs(
@@ -1419,5 +1433,48 @@ contract GradientMarketMakerPool is
         address user
     ) public view returns (uint256[] memory) {
         return userParticipatedTokenEpochs[token][user];
+    }
+
+    /**
+     * @notice Calculate token amount to ETH equivalent for epoch progression check
+     * @param token Address of the token
+     * @param tokenAmount Amount of tokens to convert
+     * @return ethEquivalent Amount of ETH equivalent
+     */
+    function _calculateTokenEthEquivalent(
+        address token,
+        uint256 tokenAmount
+    ) internal view returns (uint256 ethEquivalent) {
+        (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
+        if (reserveToken == 0) {
+            // If token reserve is zero, it means the token is not yet listed or has no liquidity.
+            // In this case, we assume a minimum liquidity threshold.
+            return minLiquidityForEpochProgression;
+        }
+
+        // Get token decimals to normalize the calculation
+        uint256 tokenDecimals = IERC20Metadata(token).decimals();
+        uint256 ethDecimals = 18; // ETH has 18 decimals
+
+        // Normalize token amount to 18 decimals for fair comparison
+        uint256 normalizedTokenAmount;
+        if (tokenDecimals < ethDecimals) {
+            // Token has fewer decimals (e.g., USDC with 6 decimals)
+            normalizedTokenAmount =
+                tokenAmount *
+                (10 ** (ethDecimals - tokenDecimals));
+        } else if (tokenDecimals > ethDecimals) {
+            // Token has more decimals (unlikely but possible)
+            normalizedTokenAmount =
+                tokenAmount /
+                (10 ** (tokenDecimals - ethDecimals));
+        } else {
+            // Same decimals (most common case)
+            normalizedTokenAmount = tokenAmount;
+        }
+
+        // Calculate ETH equivalent using normalized values
+        ethEquivalent = (normalizedTokenAmount * reserveETH) / reserveToken;
+        return ethEquivalent;
     }
 }

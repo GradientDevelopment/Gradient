@@ -804,7 +804,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         if (order.orderType == OrderType.Buy) {
             // Buy order from order to get tokens from market maker pool
             uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
-                .getCurrentTokenEpoch(order.token);
+                .currentTokenEpochs(order.token);
 
             // Collect fee from buyer BEFORE sending ETH to market maker
             uint256 buyerFee = _collectFee(paymentAmount);
@@ -850,7 +850,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         } else {
             // Sell order from order to get ETH from market maker pool
             uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
-                .getCurrentETHEpoch(order.token);
+                .currentETHEpochs(order.token);
 
             // Denormalize the amount for token approval
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
