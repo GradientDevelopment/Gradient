@@ -21,6 +21,8 @@ contract GradientRegistry is AccessControl {
     address public fallbackExecutor;
     address public router; // Uniswap V2 Router address
 
+    bool public isContractsInitialized;
+
     // Timelock configuration
     uint256 public timelockDuration = 24 hours;
     mapping(bytes32 => uint256) public pendingChanges;
@@ -53,12 +55,12 @@ contract GradientRegistry is AccessControl {
     event RegistryChangeCancelled(bytes32 indexed changeId);
     event TimelockDurationUpdated(uint256 oldDuration, uint256 newDuration);
 
-    constructor(address _admin) {
+    constructor() {
         // Set up roles
-        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
-        _grantRole(ADMIN_ROLE, _admin);
-        _grantRole(OPERATOR_ROLE, _admin);
-        _grantRole(TIMELOCK_ROLE, _admin);
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(ADMIN_ROLE, msg.sender);
+        _grantRole(OPERATOR_ROLE, msg.sender);
+        _grantRole(TIMELOCK_ROLE, msg.sender);
     }
 
     /**
@@ -72,10 +74,6 @@ contract GradientRegistry is AccessControl {
         address newAddress
     ) external onlyRole(ADMIN_ROLE) {
         require(newAddress != address(0), "Invalid address");
-        require(
-            bytes(contractName).length > 0,
-            "Contract name cannot be empty"
-        );
 
         // If this is the first time setting this contract, allow immediate execution
         if (!isInitialized[contractName]) {
@@ -141,7 +139,7 @@ contract GradientRegistry is AccessControl {
      * @param newAddress New address for the contract
      */
     function _executeContractAddressChange(
-        string calldata contractName,
+        string memory contractName,
         address newAddress
     ) internal {
         bytes32 nameHash = keccak256(bytes(contractName));
@@ -263,6 +261,25 @@ contract GradientRegistry is AccessControl {
             "Invalid fallback executor address"
         );
         require(_router != address(0), "Invalid router address");
+
+        if (!isContractsInitialized) {
+            _executeContractAddressChange("MarketMakerPool", _marketMakerPool);
+            isInitialized["MarketMakerPool"] = true;
+            _executeContractAddressChange("GradientToken", _gradientToken);
+            isInitialized["GradientToken"] = true;
+            _executeContractAddressChange("Orderbook", _orderbook);
+            isInitialized["Orderbook"] = true;
+            _executeContractAddressChange(
+                "FallbackExecutor",
+                _fallbackExecutor
+            );
+            isInitialized["FallbackExecutor"] = true;
+            _executeContractAddressChange("Router", _router);
+            isInitialized["Router"] = true;
+
+            isContractsInitialized = true;
+            return;
+        }
 
         // Set each contract address (first-time setup will be immediate)
         this.scheduleContractAddressChange("MarketMakerPool", _marketMakerPool);

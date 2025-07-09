@@ -4,7 +4,7 @@ const { ROUTER_ADDRESSES, GREY_TOKEN_ADDRESS } = require("../../config/addresses
 module.exports = buildModule("GradientProtocolTestnet", (m) => {
     // 1. Deploy GradientRegistry first (central registry)
     const deployer = m.getAccount(0); // Automatically gets the first signer
-    const gradientRegistry = m.contract("GradientRegistry", [deployer], {});
+    const gradientRegistry = m.contract("GradientRegistry", [], {});
 
     // 2. Deploy GradientMarketMakerPool (depends on registry)
     const gradientMarketMakerPool = m.contract("GradientMarketMakerPool", [
@@ -62,7 +62,6 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
     m.call(fallbackExecutor, "addDEX", [
         ROUTER_ADDRESSES.bsctest.uniswapV2Router, // PancakeSwap Router
         ROUTER_ADDRESSES.bsctest.uniswapV2Router, // Router address
-        ROUTER_ADDRESSES.bsctest.uniswapV2Factory, // Factory address
         1 // Priority (1 = highest)
     ]);
 
