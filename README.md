@@ -213,6 +213,7 @@ The contract emits the following events:
 - `OrderSizeLimitsUpdated`: When order size limits are updated
 - `MaxTTLUpdated`: When maximum TTL is updated
 - `MMFeeDistributionPercentageUpdated`: When the MM fee share is updated.
+- `MaxPriceDeviationUpdated`: When the maximum price deviation is updated.
 
 ## Dependencies
 

@@ -6,25 +6,10 @@ pragma solidity ^0.8.20;
  * @notice Interface for the GradientRegistry contract
  */
 interface IGradientRegistry {
-    // Events
-    event ContractAddressUpdated(
-        string indexed contractName,
-        address indexed oldAddress,
-        address indexed newAddress
-    );
-    event AdditionalContractSet(
-        bytes32 indexed key,
-        address indexed contractAddress
-    );
-    event ContractAuthorized(address indexed contractAddress, bool authorized);
-    event RewardDistributorSet(address indexed rewardDistributor);
-    event FulfillerAuthorized(address indexed fulfiller, bool status);
-
     /**
      * @notice Set the main contract addresses
      * @param _marketMakerPool Address of the MarketMakerPool contract
      * @param _gradientToken Address of the Gradient token contract
-     * @param _feeCollector Address of the fee collector contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
@@ -32,7 +17,6 @@ interface IGradientRegistry {
     function setMainContracts(
         address _marketMakerPool,
         address _gradientToken,
-        address _feeCollector,
         address _orderbook,
         address _fallbackExecutor,
         address _router
@@ -79,15 +63,6 @@ interface IGradientRegistry {
     function authorizeFulfiller(address fulfiller, bool status) external;
 
     /**
-     * @notice Check if a contract is authorized
-     * @param contractAddress The address to check
-     * @return bool Whether the contract is authorized
-     */
-    function isContractAuthorized(
-        address contractAddress
-    ) external view returns (bool);
-
-    /**
      * @notice Check if an address is an authorized fulfiller
      * @param fulfiller The address to check
      * @return bool Whether the address is an authorized fulfiller
@@ -100,7 +75,6 @@ interface IGradientRegistry {
      * @notice Get all main contract addresses
      * @return _marketMakerPool Address of the MarketMakerPool contract
      * @return _gradientToken Address of the Gradient token contract
-     * @return _feeCollector Address of the fee collector contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
      * @return _router Address of the Uniswap V2 Router contract
@@ -111,7 +85,6 @@ interface IGradientRegistry {
         returns (
             address _marketMakerPool,
             address _gradientToken,
-            address _feeCollector,
             address _orderbook,
             address _fallbackExecutor,
             address _router
@@ -122,8 +95,6 @@ interface IGradientRegistry {
 
     function gradientToken() external view returns (address);
 
-    function feeCollector() external view returns (address);
-
     function orderbook() external view returns (address);
 
     function fallbackExecutor() external view returns (address);
@@ -132,12 +103,6 @@ interface IGradientRegistry {
 
     // View functions for mappings
     function blockedTokens(address token) external view returns (bool);
-
-    function additionalContracts(bytes32 key) external view returns (address);
-
-    function authorizedContracts(
-        address contractAddress
-    ) external view returns (bool);
 
     function isRewardDistributor(
         address rewardDistributor

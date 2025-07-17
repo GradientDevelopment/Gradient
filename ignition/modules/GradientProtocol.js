@@ -34,18 +34,13 @@ module.exports = buildModule("GradientProtocol", (m) => {
   m.call(gradientRegistry, "setMainContracts", [
     gradientMarketMakerPool, // marketMakerPool
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
-    deployer, // feeCollector (placeholder)
     gradientOrderbook, // orderbook
     fallbackExecutor, // fallbackExecutor
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router (mainnet)
   ]);
 
   // 6. Set up initial configurations
-  // Set orderbook as authorized contract in registry
-  m.call(gradientRegistry, "setContractAuthorization", [
-    gradientOrderbook,
-    true,
-  ]);
+  // Note: setContractAuthorization was removed - roles are now managed through AccessControl
 
   // 7. Configure orderbook settings
   // Set initial fee percentage (0.5% = 50 basis points)
@@ -53,7 +48,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
 
   // Set order size limits
   m.call(gradientOrderbook, "setOrderSizeLimits", [
-    "1000000000000", // minOrderSize: 0.001 ETH
+    "10000000000000", // minOrderSize: 0.001 ETH
     "1000000000000000000000", // maxOrderSize: 1000 ETH
   ]);
 
@@ -80,7 +75,6 @@ module.exports = buildModule("GradientProtocol", (m) => {
   m.call(fallbackExecutor, "addDEX", [
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Router address
-    ROUTER_ADDRESSES.mainnet.uniswapV2Factory, // Factory address
     1, // Priority (1 = highest)
   ]);
 

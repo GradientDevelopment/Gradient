@@ -16,6 +16,7 @@ interface IGradientMarketMakerPool {
         uint256 accTokenRewardPerShare; // For token rewards to ETH providers
         uint256 tokenRewardBalance; // Token rewards for ETH providers
         address uniswapPair;
+        bool finalized; // Flag to indicate if epoch is finalized
     }
 
     struct ETHProvider {
@@ -37,6 +38,7 @@ interface IGradientMarketMakerPool {
         uint256 accETHRewardPerShare; // For ETH rewards to token providers
         uint256 ethRewardBalance; // ETH rewards for token providers
         address uniswapPair;
+        bool finalized; // Flag to indicate if epoch is finalized
     }
 
     struct TokenProvider {
@@ -87,12 +89,18 @@ interface IGradientMarketMakerPool {
         bool isETH
     );
 
-    event PoolFeeClaimed(
+    event FeeClaimedFromEthPool(
         address indexed user,
         uint256 amount,
         address token,
-        uint256 epoch,
-        bool isETH
+        uint256 epoch
+    );
+
+    event EthFeeClaimedFromTokenPool(
+        address indexed user,
+        uint256 amount,
+        address token,
+        uint256 epoch
     );
 
     event PoolSharesClaimed(
@@ -124,6 +132,14 @@ interface IGradientMarketMakerPool {
     event EpochIncremented(address indexed token, uint256 newEpoch);
 
     event RegistryUpdated(address oldRegistry, address newRegistry);
+
+    event EpochCooldownPeriodUpdated(uint256 newCooldownPeriod);
+    event MinLiquidityForEpochProgressionUpdated(uint256 newMinLiquidity);
+    event MinTokenLiquidityForEpochProgressionUpdated(
+        uint256 newMinTokenLiquidity
+    );
+
+    event EpochFinalized(address indexed token, uint256 epoch, bool isETHPool);
 
     /**
      * @notice Add ETH liquidity to the pool
@@ -232,42 +248,21 @@ interface IGradientMarketMakerPool {
      * @param token Address of the token pool to claim rewards from
      * @param epoch Epoch to claim rewards from
      */
-    function claimTokenPoolFee(address token, uint256 epoch) external;
+    function claimEthFeeFromTokenPool(address token, uint256 epoch) external;
 
     /**
-     * @notice Gets ETH pool information for a specific token and epoch
-     * @param token Address of the token to get ETH pool info for
-     * @param epoch Epoch to get ETH pool info for
-     * @return ETHPoolInfo struct containing ETH pool details
-     */
-    function getETHPoolInfo(
-        address token,
-        uint256 epoch
-    ) external view returns (ETHPoolInfo memory);
-
-    /**
-     * @notice Gets token pool information for a specific token and epoch
-     * @param token Address of the token to get token pool info for
-     * @param epoch Epoch to get token pool info for
-     * @return TokenPoolInfo struct containing token pool details
-     */
-    function getTokenPoolInfo(
-        address token,
-        uint256 epoch
-    ) external view returns (TokenPoolInfo memory);
-
-    /**
-     * @notice Gets a user's LP shares for token pool in a specific epoch
+     * @notice Get the current ETH epoch for a token
      * @param token Address of the token
-     * @param user Address of the user
-     * @param epoch Epoch to get token provider LP shares for
-     * @return lpShares User's LP shares in token pool
+     * @return Current ETH epoch number
      */
-    function getTokenProviderLPShares(
-        address token,
-        address user,
-        uint256 epoch
-    ) external view returns (uint256 lpShares);
+    function currentETHEpochs(address token) external view returns (uint256);
+
+    /**
+     * @notice Get the current token epoch for a token
+     * @param token Address of the token
+     * @return Current token epoch number
+     */
+    function currentTokenEpochs(address token) external view returns (uint256);
 
     /**
      * @notice Get the Uniswap V2 pair address for a given token
@@ -289,18 +284,16 @@ interface IGradientMarketMakerPool {
     ) external view returns (uint256 reserveETH, uint256 reserveToken);
 
     /**
-     * @notice Get current ETH epoch for a token
-     * @param token Address of the token
-     * @return Current ETH epoch number
+     * @notice Set epoch cooldown period to prevent rapid epoch creation
+     * @param _epochCooldownPeriod New cooldown period in seconds
      */
-    function getCurrentETHEpoch(address token) external view returns (uint256);
+    function setEpochCooldownPeriod(uint256 _epochCooldownPeriod) external;
 
     /**
-     * @notice Get current token epoch for a token
-     * @param token Address of the token
-     * @return Current token epoch number
+     * @notice Set minimum ETH liquidity required for epoch progression
+     * @param _minLiquidityForEpochProgression New minimum ETH liquidity amount
      */
-    function getCurrentTokenEpoch(
-        address token
-    ) external view returns (uint256);
+    function setMinLiquidityForEpochProgression(
+        uint256 _minLiquidityForEpochProgression
+    ) external;
 }
