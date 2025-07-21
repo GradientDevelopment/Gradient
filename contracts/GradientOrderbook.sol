@@ -214,6 +214,32 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         _;
     }
 
+    modifier validateMarketOrderPrice(uint256 orderId, uint256 executionPrice) {
+        Order memory order = orders[orderId];
+
+        if (order.executionType == OrderExecutionType.Market) {
+            if (order.orderType == OrderType.Buy) {
+                require(
+                    executionPrice <= order.price,
+                    "Execution price exceeds buyer's max price"
+                );
+            } else {
+                require(
+                    executionPrice >= order.price,
+                    "Execution price below seller's min price"
+                );
+            }
+        }
+
+        if (order.executionType == OrderExecutionType.Limit) {
+            require(
+                executionPrice == order.price,
+                "Execution price not matched with order price."
+            );
+        }
+        _;
+    }
+
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
         feePercentage = 50; // Default 0.5%
@@ -756,35 +782,54 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Fulfills multiple orders through the market maker pool
     /// @param orderIds Array of order IDs to fulfill
     /// @param fillAmounts Array of fill amounts for each order
+    /// @param executionPrices Array of execution prices for each order
     /// @dev Only whitelisted fulfillers can call this function
     function fulfillOrdersWithMarketMaker(
         uint256[] calldata orderIds,
-        uint256[] calldata fillAmounts
+        uint256[] calldata fillAmounts,
+        uint256[] calldata executionPrices
     ) external nonReentrant onlyAuthorizedFulfiller {
         require(orderIds.length > 0, "No orders to fulfill");
         require(
-            orderIds.length == fillAmounts.length,
+            orderIds.length == fillAmounts.length &&
+                orderIds.length == executionPrices.length,
             "Mismatched arrays length"
         );
 
         for (uint256 i = 0; i < orderIds.length; i++) {
             require(fillAmounts[i] > 0, "Fill amount must be greater than 0");
-            _fulfillOrderWithMarketMaker(orderIds[i], fillAmounts[i]);
+            require(
+                executionPrices[i] > 0,
+                "Execution price must be greater than 0"
+            );
+            _fulfillOrderWithMarketMaker(
+                orderIds[i],
+                fillAmounts[i],
+                executionPrices[i]
+            );
         }
     }
 
     /// @notice Internal function to fulfill a single order through the market maker pool
     /// @param orderId ID of the order to fulfill
     /// @param fillAmount Amount of tokens to fill
+    /// @param executionPrice The price at which the order will be executed
     function _fulfillOrderWithMarketMaker(
         uint256 orderId,
-        uint256 fillAmount
-    ) internal {
+        uint256 fillAmount,
+        uint256 executionPrice
+    ) internal validateMarketOrderPrice(orderId, executionPrice) {
         Order storage order = orders[orderId];
 
         // Validate order
         require(order.status == OrderStatus.Active, "Order not active");
         require(!isOrderExpired(orderId), "Order expired");
+
+        // Validate execution price against market price
+        require(
+            validateExecutionPrice(order.token, executionPrice),
+            "Execution price deviates too much from market price"
+        );
 
         // Get market maker pool address from registry
         address marketMakerPool = gradientRegistry.marketMakerPool();
@@ -799,7 +844,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(actualFillAmount > 0, "No amount to fill");
 
         // Calculate payment amount and fees
-        uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
+        uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
 
         if (order.orderType == OrderType.Buy) {
             // Buy order from order to get tokens from market maker pool
@@ -833,7 +878,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             }
 
             // Calculate token fee and deduct from received tokens
-            uint256 tokenFee = (buyerFee * 1e18) / order.price;
+            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
                 actualFillAmount,
                 order.token
@@ -903,7 +948,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             orderId,
             marketMakerPool,
             actualFillAmount,
-            order.price
+            executionPrice
         );
     }
 
