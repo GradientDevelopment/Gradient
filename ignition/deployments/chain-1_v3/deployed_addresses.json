@@ -1,0 +1,6 @@
+{
+  "GradientProtocol#GradientRegistry": "0x15a495C1b95B6843633DD3eC851F16B259c5E325",
+  "GradientProtocol#FallbackExecutor": "0x4Bc322aa977B857314d99fe7e19CF5Cf7558720d",
+  "GradientProtocol#GradientMarketMakerPool": "0xDC7519281BA7aD060A01032A62A8720a59EBBD1F",
+  "GradientProtocol#GradientOrderbook": "0x463a85F135f68987175CEFd434E215979EcdDb00"
+}

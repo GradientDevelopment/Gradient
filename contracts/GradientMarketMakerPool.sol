@@ -820,7 +820,9 @@ contract GradientMarketMakerPool is
             uint256 tokenRewards = provider.pendingTokenReward;
             provider.pendingTokenReward = 0;
             totalTokensRemoved[token] += tokenRewards;
-            IERC20(token).safeTransfer(msg.sender, tokenRewards);
+            if (tokenRewards > 0) {
+                IERC20(token).safeTransfer(msg.sender, tokenRewards);
+            }
 
             emit PoolSharesClaimed(
                 msg.sender,
@@ -985,7 +987,9 @@ contract GradientMarketMakerPool is
             actualTokenWithdraw >= minTokenAmount,
             "Insufficient token withdrawn"
         );
-        IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
+        if (actualTokenWithdraw > 0) {
+            IERC20(token).safeTransfer(msg.sender, actualTokenWithdraw);
+        }
 
         // Transfer accumulated ETH rewards to user
         if (provider.pendingETHReward > 0) {
@@ -1042,7 +1046,9 @@ contract GradientMarketMakerPool is
         _updateTokenPoolETHRewards(token, ethAmount);
 
         // Transfer tokens to orderbook
-        IERC20(token).safeTransfer(msg.sender, tokenAmount);
+        if (tokenAmount > 0) {
+            IERC20(token).safeTransfer(msg.sender, tokenAmount);
+        }
 
         // Check if token pool is empty and increment token epoch if needed
         _checkAndIncrementTokenEpoch(token);
@@ -1284,8 +1290,6 @@ contract GradientMarketMakerPool is
     function withdrawExcessiveFunds(
         address token
     ) external onlyOwner nonReentrant {
-        require(token != address(0), "Invalid token address");
-
         // Calculate excessive ETH (overall contract balance)
         uint256 currentEthBalance = address(this).balance;
         uint256 totalEthContributed = totalEthAdded - totalEthRemoved;
@@ -1476,5 +1480,70 @@ contract GradientMarketMakerPool is
         // Calculate ETH equivalent using normalized values
         ethEquivalent = (normalizedTokenAmount * reserveETH) / reserveToken;
         return ethEquivalent;
+    }
+
+    /// @notice Emergency function to withdraw specific amount of ETH from the contract
+    /// @param recipient Address to receive the ETH
+    /// @param amount Amount of ETH to withdraw
+    /// @dev Only callable by contract owner in emergency situations
+    function emergencyWithdrawETHAmount(
+        address payable recipient,
+        uint256 amount
+    ) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be greater than 0");
+        require(address(this).balance >= amount, "Insufficient ETH balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "ETH withdrawal failed");
+
+        emit EmergencyWithdrawETH(recipient, amount);
+    }
+
+    /// @notice Emergency function to withdraw specific amount of tokens from the contract
+    /// @param token Address of the token to withdraw
+    /// @param recipient Address to receive the tokens
+    /// @param amount Amount of tokens to withdraw
+    /// @dev Only callable by contract owner in emergency situations
+    function emergencyWithdrawTokenAmount(
+        address token,
+        address recipient,
+        uint256 amount
+    ) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be greater than 0");
+
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance >= amount, "Insufficient token balance");
+
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit EmergencyWithdrawToken(token, recipient, amount);
+    }
+
+    /// @notice Emergency function to withdraw multiple tokens at once
+    /// @param tokens Array of token addresses to withdraw
+    /// @param recipient Address to receive all tokens
+    /// @dev Only callable by contract owner in emergency situations
+    /// @dev More gas efficient than calling emergencyWithdrawToken multiple times
+    function emergencyWithdrawMultipleTokens(
+        address[] calldata tokens,
+        address recipient
+    ) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(tokens.length > 0, "No tokens specified");
+        require(tokens.length <= 20, "Too many tokens to withdraw at once");
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            require(token != address(0), "Invalid token address");
+
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(token).safeTransfer(recipient, balance);
+                emit EmergencyWithdrawToken(token, recipient, balance);
+            }
+        }
     }
 }

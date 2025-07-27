@@ -141,6 +141,16 @@ interface IGradientMarketMakerPool {
 
     event EpochFinalized(address indexed token, uint256 epoch, bool isETHPool);
 
+    /// @notice Emitted when ETH is withdrawn in emergency
+    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
+
+    /// @notice Emitted when tokens are withdrawn in emergency
+    event EmergencyWithdrawToken(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
+
     /**
      * @notice Add ETH liquidity to the pool
      * @param token Address of the token to provide ETH liquidity for

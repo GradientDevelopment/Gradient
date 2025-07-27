@@ -55,6 +55,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address token; // Token being traded
         uint256 amount; // Total amount of tokens to trade
         uint256 price; // For limit orders: exact price, For market orders: max price (buy) or min price (sell)
+        uint256 ethAmount; // Amount of ETH committed for buy orders
+        uint256 ethSpent; // Actual ETH spent so far (for buy market orders)
         uint256 filledAmount; // Amount of tokens that have been filled
         uint256 expirationTime; // Timestamp when the order expires
         OrderStatus status; // Current status of the order
@@ -111,6 +113,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Maximum allowed price deviation from market price (in basis points, 1 = 0.01%)
     uint256 public maxPriceDeviation = 500; // 5% default
 
+    /// @notice Dust tolerance for automatic order fulfillment (in basis points, 1 = 0.01%)
+    uint256 public dustTolerance = 100; // 1% default
+
     /// @notice Emitted when a new order is created
     event OrderCreated(
         uint256 indexed orderId,
@@ -121,7 +126,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 price,
         uint256 expirationTime,
-        uint256 totalCost // Add total cost for better tracking
+        uint256 totalCost,
+        string objectId
     );
 
     /// @notice Emitted when an order is cancelled by its owner
@@ -131,13 +137,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     event OrderExpired(uint256 indexed orderId);
 
     /// @notice Emitted when an order is completely filled
-    event OrderFulfilled(uint256 indexed orderId, uint256 amount);
+    event OrderFulfilled(
+        uint256 indexed orderId,
+        uint256 amount,
+        uint256 totalFilledAmount,
+        uint256 executionPrice
+    );
 
     /// @notice Emitted when an order is partially filled
     event OrderPartiallyFulfilled(
         uint256 indexed orderId,
         uint256 amount,
-        uint256 remaining
+        uint256 remaining,
+        uint256 totalFilledAmount,
+        uint256 executionPrice
     );
 
     /// @notice Emitted when fee percentage is updated
@@ -186,6 +199,19 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Emitted when max price deviation is updated
     event MaxPriceDeviationUpdated(uint256 oldDeviation, uint256 newDeviation);
+
+    /// @notice Emitted when dust tolerance is updated
+    event DustToleranceUpdated(uint256 oldTolerance, uint256 newTolerance);
+
+    /// @notice Emitted when ETH is withdrawn in emergency
+    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
+
+    /// @notice Emitted when tokens are withdrawn in emergency
+    event EmergencyWithdrawToken(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
 
     // Modifiers
     modifier onlyAuthorizedFulfiller() {
@@ -333,7 +359,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address token,
         uint256 amount,
         uint256 price,
-        uint256 ttl
+        uint256 ttl,
+        string memory objectId
     ) external payable validToken(token) nonReentrant returns (uint256) {
         require(amount > 0, "Amount must be greater than 0");
         require(price > 0, "Invalid price range");
@@ -342,6 +369,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Normalize token amount to 18 decimals for consistent price calculations
         uint256 normalizedAmount = normalizeTo18Decimals(amount, token);
+
+        // Check for overflow in price calculation
+        require(
+            normalizedAmount <= type(uint256).max / price,
+            "Price calculation would overflow"
+        );
         uint256 totalCost = (normalizedAmount * price) / 1e18;
         require(totalCost >= minOrderSize, "Order too small");
         require(totalCost <= maxOrderSize, "Order too large");
@@ -353,10 +386,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
-        uint256 orderId = _orderIdCounter;
-        _orderIdCounter++;
+        uint256 orderId = _orderIdCounter++;
+        uint256 expirationTime = block.timestamp + ttl;
 
-        Order memory newOrder = Order({
+        orders[orderId] = Order({
             orderId: orderId,
             owner: msg.sender,
             orderType: orderType,
@@ -364,12 +397,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             token: token,
             amount: normalizedAmount, // Store normalized amount for calculations
             price: price,
+            ethAmount: (orderType == OrderType.Buy) ? totalCost : 0,
+            ethSpent: 0,
             filledAmount: 0,
-            expirationTime: block.timestamp + ttl,
+            expirationTime: expirationTime,
             status: OrderStatus.Active
         });
-
-        orders[orderId] = newOrder;
 
         // Add to the appropriate queue based on execution type
         _addOrderToQueue(orderId, token, orderType, executionType);
@@ -382,14 +415,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             token,
             amount, // Emit original amount for transparency
             price,
-            newOrder.expirationTime,
-            totalCost
+            expirationTime,
+            totalCost,
+            objectId
         );
 
         // Return excess ETH for buy orders
         if (orderType == OrderType.Buy && msg.value > totalCost) {
-            uint256 excess = msg.value - totalCost;
-            (bool success, ) = msg.sender.call{value: excess}("");
+            (bool success, ) = msg.sender.call{value: msg.value - totalCost}(
+                ""
+            );
             require(success, "ETH return failed");
         }
 
@@ -410,9 +445,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         order.status = OrderStatus.Cancelled;
         // If it was a buy order, return the ETH including potential fee
         if (order.orderType == OrderType.Buy) {
-            uint256 remainingAmount = order.amount - order.filledAmount;
-            if (remainingAmount > 0) {
-                uint256 refundAmount = (remainingAmount * order.price) / 1e18;
+            uint256 refundAmount;
+            if (order.executionType == OrderExecutionType.Market) {
+                // For market buy orders, refund remaining ETH
+                refundAmount = order.ethAmount > order.ethSpent
+                    ? (order.ethAmount - order.ethSpent)
+                    : 0;
+            } else {
+                // For limit buy orders, calculate based on remaining tokens
+                uint256 remainingAmount = order.amount > order.filledAmount
+                    ? (order.amount - order.filledAmount)
+                    : 0;
+                refundAmount = (remainingAmount * order.price) / 1e18;
+            }
+            if (refundAmount > 0) {
                 require(
                     address(this).balance >= refundAmount,
                     "Insufficient ETH in contract"
@@ -423,7 +469,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
         // If it was a sell order, return the tokens
         else {
-            uint256 remainingAmount = order.amount - order.filledAmount;
+            uint256 remainingAmount = order.amount > order.filledAmount
+                ? (order.amount - order.filledAmount)
+                : 0;
             if (remainingAmount > 0) {
                 // Denormalize the remaining amount back to token decimals
                 uint256 actualRemainingAmount = denormalizeFrom18Decimals(
@@ -447,59 +495,86 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         emit OrderCancelled(orderId);
     }
 
-    /// @notice Marks an expired order as expired and handles refunds
-    /// @param orderId ID of the expired order to clean up
+    /// @notice Marks multiple expired orders as expired and handles refunds
+    /// @param orderIds Array of IDs of expired orders to clean up
     /// @dev Anyone can call this function for expired orders
     /// @dev Refunds tokens for unfilled sell orders and ETH for unfilled buy orders
-    function cleanupExpiredOrder(
-        uint256 orderId
-    ) external nonReentrant orderExists(orderId) {
-        Order storage order = orders[orderId];
-        require(order.status == OrderStatus.Active, "Order not active");
-        require(isOrderExpired(orderId), "Order not expired");
+    /// @dev More gas efficient than calling cleanupExpiredOrder multiple times
+    function cleanupExpiredOrders(
+        uint256[] memory orderIds
+    ) external nonReentrant {
+        require(orderIds.length > 0, "No orders to clean up");
+        require(orderIds.length <= 100, "Too many orders to clean up at once");
 
-        order.status = OrderStatus.Expired;
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            uint256 orderId = orderIds[i];
 
-        // If it was a sell order, return the tokens
-        if (order.orderType == OrderType.Sell) {
-            uint256 remainingAmount = order.amount - order.filledAmount;
-            if (remainingAmount > 0) {
-                // Denormalize the remaining amount back to token decimals
-                uint256 actualRemainingAmount = denormalizeFrom18Decimals(
-                    remainingAmount,
-                    order.token
-                );
-                IERC20(order.token).safeTransfer(
-                    order.owner,
-                    actualRemainingAmount
-                );
+            // Check if order exists
+            require(
+                orders[orderId].owner != address(0),
+                "Order does not exist"
+            );
+
+            Order storage order = orders[orderId];
+            require(order.status == OrderStatus.Active, "Order not active");
+            require(isOrderExpired(orderId), "Order not expired");
+
+            order.status = OrderStatus.Expired;
+
+            // If it was a sell order, return the tokens
+            if (order.orderType == OrderType.Sell) {
+                uint256 remainingAmount = order.amount > order.filledAmount
+                    ? (order.amount - order.filledAmount)
+                    : 0;
+                if (remainingAmount > 0) {
+                    // Denormalize the remaining amount back to token decimals
+                    uint256 actualRemainingAmount = denormalizeFrom18Decimals(
+                        remainingAmount,
+                        order.token
+                    );
+                    IERC20(order.token).safeTransfer(
+                        order.owner,
+                        actualRemainingAmount
+                    );
+                }
             }
-        }
 
-        if (order.orderType == OrderType.Buy) {
-            uint256 remainingAmount = order.amount - order.filledAmount;
-            if (remainingAmount > 0) {
-                uint256 refundAmount = (remainingAmount * order.price) / 1e18;
-                require(
-                    address(this).balance >= refundAmount,
-                    "Insufficient ETH in contract"
-                );
-                // Refund the ETH
-                (bool success, ) = payable(order.owner).call{
-                    value: refundAmount
-                }("");
-                require(success, "ETH refund failed");
+            if (order.orderType == OrderType.Buy) {
+                uint256 refundAmount;
+                if (order.executionType == OrderExecutionType.Market) {
+                    // For market buy orders, refund remaining ETH
+                    refundAmount = order.ethAmount > order.ethSpent
+                        ? (order.ethAmount - order.ethSpent)
+                        : 0;
+                } else {
+                    // For limit buy orders, calculate based on remaining tokens
+                    uint256 remainingAmount = order.amount > order.filledAmount
+                        ? (order.amount - order.filledAmount)
+                        : 0;
+                    refundAmount = (remainingAmount * order.price) / 1e18;
+                }
+                if (refundAmount > 0) {
+                    require(
+                        address(this).balance >= refundAmount,
+                        "Insufficient ETH in contract"
+                    );
+                    // Refund the ETH
+                    (bool success, ) = payable(order.owner).call{
+                        value: refundAmount
+                    }("");
+                    require(success, "ETH refund failed");
+                }
             }
+
+            bytes32 queueKey = _getQueueKey(
+                order.token,
+                order.orderType,
+                order.executionType
+            );
+            _removeOrderFromLinkedQueue(queueKey, orderId);
+
+            emit OrderExpired(orderId);
         }
-
-        bytes32 queueKey = _getQueueKey(
-            order.token,
-            order.orderType,
-            order.executionType
-        );
-        _removeOrderFromLinkedQueue(queueKey, orderId);
-
-        emit OrderExpired(orderId);
     }
 
     /// @notice Fulfills multiple matched limit orders
@@ -589,8 +664,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         );
 
         // Calculate actual fill amount based on remaining amounts
-        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
-        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
+        uint256 buyRemaining = buyOrder.amount > buyOrder.filledAmount
+            ? (buyOrder.amount - buyOrder.filledAmount)
+            : 0;
+        uint256 sellRemaining = sellOrder.amount > sellOrder.filledAmount
+            ? (sellOrder.amount - sellOrder.filledAmount)
+            : 0;
         uint256 actualFillAmount = _match.fillAmount;
 
         // Adjust fill amount if it exceeds either order's remaining amount
@@ -649,8 +728,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
 
         // Update order statuses and remove from queues if fully filled
-        _updateOrderStatus(_match.buyOrderId, actualFillAmount);
-        _updateOrderStatus(_match.sellOrderId, actualFillAmount);
+        _updateOrderStatus(
+            _match.buyOrderId,
+            actualFillAmount,
+            sellOrder.price
+        );
+        _updateOrderStatus(
+            _match.sellOrderId,
+            actualFillAmount,
+            buyOrder.price
+        );
     }
 
     /// @notice Internal function to fulfill a matched pair of market orders
@@ -723,11 +810,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
 
         // Calculate actual fill amount based on remaining amounts
-        uint256 buyRemaining = buyOrder.amount - buyOrder.filledAmount;
-        uint256 sellRemaining = sellOrder.amount - sellOrder.filledAmount;
-        uint256 actualFillAmount = _match.fillAmount;
+        uint256 buyRemaining = getBuyOrderRemainingAmount(
+            buyOrder,
+            executionPrice
+        );
+        uint256 sellRemaining = sellOrder.amount > sellOrder.filledAmount
+            ? (sellOrder.amount - sellOrder.filledAmount)
+            : 0;
 
-        // Adjust fill amount if it exceeds either order's remaining amount
+        uint256 actualFillAmount = _match.fillAmount;
         if (actualFillAmount > buyRemaining) {
             actualFillAmount = buyRemaining;
         }
@@ -772,11 +863,22 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Update order states
         buyOrder.filledAmount += actualFillAmount;
+        // Track actual ETH spent for buy market orders
+        if (
+            buyOrder.orderType == OrderType.Buy &&
+            buyOrder.executionType == OrderExecutionType.Market
+        ) {
+            buyOrder.ethSpent += paymentAmount;
+        }
         sellOrder.filledAmount += actualFillAmount;
 
         // Update order statuses and remove from queues if fully filled
-        _updateOrderStatus(_match.buyOrderId, actualFillAmount);
-        _updateOrderStatus(_match.sellOrderId, actualFillAmount);
+        _updateOrderStatus(_match.buyOrderId, actualFillAmount, executionPrice);
+        _updateOrderStatus(
+            _match.sellOrderId,
+            actualFillAmount,
+            executionPrice
+        );
     }
 
     /// @notice Fulfills multiple orders through the market maker pool
@@ -836,7 +938,17 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(marketMakerPool != address(0), "Market maker pool not set");
 
         // Calculate actual fill amount based on remaining amount
-        uint256 remainingAmount = order.amount - order.filledAmount;
+        uint256 remainingAmount;
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            remainingAmount = getBuyOrderRemainingAmount(order, executionPrice);
+        } else {
+            remainingAmount = order.amount > order.filledAmount
+                ? (order.amount - order.filledAmount)
+                : 0;
+        }
         uint256 actualFillAmount = fillAmount > remainingAmount
             ? remainingAmount
             : fillAmount;
@@ -940,9 +1052,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Update order state
         order.filledAmount += actualFillAmount;
+        // Track actual ETH spent for buy market orders
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            order.ethSpent += paymentAmount;
+        }
 
         // Update order status
-        _updateOrderStatus(orderId, actualFillAmount);
+        _updateOrderStatus(orderId, actualFillAmount, executionPrice);
 
         emit OrderFulfilledByMarketMaker(
             orderId,
@@ -969,43 +1088,64 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(order.status == OrderStatus.Active, "Order not active");
 
         // Calculate actual fill amount based on remaining amount
-        uint256 remainingAmount = order.amount - order.filledAmount;
+        uint256 remainingAmount;
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            remainingAmount = getBuyOrderRemainingAmount(order, order.price);
+        } else {
+            remainingAmount = order.amount > order.filledAmount
+                ? (order.amount - order.filledAmount)
+                : 0;
+        }
         uint256 actualFillAmount = fillAmount > remainingAmount
             ? remainingAmount
             : fillAmount;
         require(actualFillAmount > 0, "No amount to fill");
 
-        // Calculate payment amount and fees
-        uint256 paymentAmount = (actualFillAmount * order.price) / 1e18;
-
         // Get FallbackExecutor from registry
         address fallbackExecutor = gradientRegistry.fallbackExecutor();
         require(fallbackExecutor != address(0), "FallbackExecutor not set");
 
-        // Execute trade through FallbackExecutor
-        if (order.orderType == OrderType.Buy) {
-            // Calculate and collect buyer fee from deposited ETH
-            uint256 buyerFee = _collectFee(paymentAmount);
+        // For buy orders, calculate how much ETH to send based on order type
+        uint256 ethToSend;
+        uint256 effectiveExecutionPrice;
 
-            // Execute the buy trade directly through FallbackExecutor
+        if (order.orderType == OrderType.Buy) {
+            if (order.executionType == OrderExecutionType.Market) {
+                // For market orders, send the remaining ETH (up to the fill amount)
+                uint256 ethRemaining = order.ethAmount > order.ethSpent
+                    ? (order.ethAmount - order.ethSpent)
+                    : 0;
+                ethToSend = ethRemaining;
+            } else {
+                // For limit orders, calculate based on order price
+                ethToSend = (actualFillAmount * order.price) / 1e18;
+            }
+
+            // Calculate and collect buyer fee BEFORE sending ETH to AMM
+            uint256 buyerFee = _collectFee(ethToSend);
+            uint256 netEthToSend = ethToSend - buyerFee;
+
+            // Execute the buy trade directly through FallbackExecutor with net ETH amount
             uint256 tokensReceived = IFallbackExecutor(fallbackExecutor)
-                .executeTrade{value: paymentAmount}(
+                .executeTrade{value: netEthToSend}(
                 order.token,
-                paymentAmount,
+                netEthToSend,
                 minAmountOut,
                 true // isBuy = true
             );
 
-            // Calculate token fee and deduct from received tokens
-            uint256 tokenFee = (buyerFee * 1e18) / order.price;
-            uint256 actualTokenFee = denormalizeFrom18Decimals(
-                tokenFee,
-                order.token
-            );
-            IERC20(order.token).safeTransfer(
-                order.owner,
-                tokensReceived - actualTokenFee
-            );
+            // Transfer all received tokens to the buyer (fee already collected in ETH)
+            IERC20(order.token).safeTransfer(order.owner, tokensReceived);
+
+            // Calculate effective execution price for buy orders
+            if (tokensReceived > 0) {
+                effectiveExecutionPrice = (ethToSend * 1e18) / tokensReceived;
+            } else {
+                effectiveExecutionPrice = order.price; // Fallback to order price
+            }
         } else {
             // Denormalize the amount for token approval and transfer
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
@@ -1031,37 +1171,115 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 ethForUser = ethReceived - ammFee;
             (bool success, ) = order.owner.call{value: ethForUser}("");
             require(success, "ETH transfer to seller failed");
+
+            // Calculate effective execution price for sell orders
+            if (actualFillAmount > 0) {
+                effectiveExecutionPrice =
+                    (ethReceived * 1e18) /
+                    actualFillAmount;
+            } else {
+                effectiveExecutionPrice = order.price; // Fallback to order price
+            }
         }
         order.filledAmount += actualFillAmount;
+        // Track actual ETH spent for buy market orders
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            order.ethSpent += ethToSend;
+        }
 
         // Update order status
-        _updateOrderStatus(orderId, actualFillAmount);
+        _updateOrderStatus(orderId, actualFillAmount, effectiveExecutionPrice);
     }
 
     /// @notice Internal function to update order status
     /// @param orderId ID of the order to update
     /// @param actualFillAmount Amount of tokens/ETH that was filled
+    /// @param executionPrice The price at which the order was executed
     function _updateOrderStatus(
         uint256 orderId,
-        uint256 actualFillAmount
+        uint256 actualFillAmount,
+        uint256 executionPrice
     ) internal {
         Order storage order = orders[orderId];
-        if (order.filledAmount == order.amount) {
-            order.status = OrderStatus.Filled;
-            bytes32 queueKey = _getQueueKey(
-                order.token,
-                order.orderType,
-                order.executionType
-            );
-            _removeOrderFromLinkedQueue(queueKey, orderId);
+        // For buy market orders, check if all ETH is spent
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            uint256 remainingEth = order.ethAmount > order.ethSpent
+                ? (order.ethAmount - order.ethSpent)
+                : 0;
 
-            emit OrderFulfilled(orderId, actualFillAmount);
+            // Check if remaining ETH is below dust tolerance
+            bool isDustRemaining = remainingEth > 0 &&
+                (remainingEth * 10000) / order.ethAmount <= dustTolerance;
+
+            if (order.ethSpent >= order.ethAmount || isDustRemaining) {
+                order.status = OrderStatus.Filled;
+                // If dust remaining, mark it as spent to prevent refund issues
+                if (isDustRemaining) {
+                    order.ethSpent = order.ethAmount;
+                }
+                bytes32 queueKey = _getQueueKey(
+                    order.token,
+                    order.orderType,
+                    order.executionType
+                );
+                _removeOrderFromLinkedQueue(queueKey, orderId);
+                emit OrderFulfilled(
+                    orderId,
+                    actualFillAmount,
+                    order.ethSpent,
+                    executionPrice
+                );
+            } else {
+                emit OrderPartiallyFulfilled(
+                    orderId,
+                    actualFillAmount,
+                    remainingEth,
+                    order.ethSpent,
+                    executionPrice
+                );
+            }
         } else {
-            emit OrderPartiallyFulfilled(
-                orderId,
-                actualFillAmount,
-                order.amount - order.filledAmount
-            );
+            uint256 remainingAmount = order.amount > order.filledAmount
+                ? (order.amount - order.filledAmount)
+                : 0;
+
+            // Check if remaining tokens are below dust tolerance
+            bool isDustRemaining = remainingAmount > 0 &&
+                (remainingAmount * 10000) / order.amount <= dustTolerance;
+
+            if (order.filledAmount == order.amount || isDustRemaining) {
+                order.status = OrderStatus.Filled;
+                // If dust remaining, mark it as filled to prevent refund issues
+                if (isDustRemaining) {
+                    order.filledAmount = order.amount;
+                }
+                bytes32 queueKey = _getQueueKey(
+                    order.token,
+                    order.orderType,
+                    order.executionType
+                );
+                _removeOrderFromLinkedQueue(queueKey, orderId);
+                emit OrderFulfilled(
+                    orderId,
+                    actualFillAmount,
+                    order.filledAmount,
+                    executionPrice
+                );
+            } else {
+                emit OrderPartiallyFulfilled(
+                    orderId,
+                    actualFillAmount,
+                    remainingAmount,
+                    order.filledAmount,
+                    executionPrice
+                );
+            }
         }
     }
 
@@ -1207,7 +1425,47 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 orderId
     ) external view orderExists(orderId) returns (uint256) {
         Order storage order = orders[orderId];
-        return order.amount - order.filledAmount;
+        if (
+            order.orderType == OrderType.Buy &&
+            order.executionType == OrderExecutionType.Market
+        ) {
+            // For market buy orders, return remaining ETH
+            return
+                order.ethAmount > order.ethSpent
+                    ? (order.ethAmount - order.ethSpent)
+                    : 0;
+        } else {
+            // For other orders, return remaining tokens
+            return
+                order.amount > order.filledAmount
+                    ? (order.amount - order.filledAmount)
+                    : 0;
+        }
+    }
+
+    // ========================== Internal Helper Functions ==========================
+    /// @notice Calculates the remaining buyable token amount for a buy order
+    /// @param order The order struct (storage pointer)
+    /// @param executionPrice The price at which the order is being filled
+    /// @return uint256 The remaining amount of tokens that can be bought
+    function getBuyOrderRemainingAmount(
+        Order storage order,
+        uint256 executionPrice
+    ) internal view returns (uint256) {
+        if (
+            order.executionType == OrderExecutionType.Market &&
+            order.orderType == OrderType.Buy
+        ) {
+            uint256 ethRemaining = order.ethAmount > order.ethSpent
+                ? (order.ethAmount - order.ethSpent)
+                : 0;
+            return (ethRemaining * 1e18) / executionPrice;
+        } else {
+            return
+                order.amount > order.filledAmount
+                    ? (order.amount - order.filledAmount)
+                    : 0;
+        }
     }
 
     // ========================== Admin Functions ==========================
@@ -1291,6 +1549,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 oldPercentage = mmFeeDistributionPercentage;
         mmFeeDistributionPercentage = newPercentage;
         emit MMFeeDistributionPercentageUpdated(oldPercentage, newPercentage);
+    }
+
+    /// @notice Updates the dust tolerance
+    /// @param newDustTolerance New dust tolerance in basis points (1 = 0.01%)
+    /// @dev Only callable by contract owner
+    function updateDustTolerance(uint256 newDustTolerance) external onlyOwner {
+        require(newDustTolerance <= 10000, "Dust tolerance too high");
+        uint256 oldDustTolerance = dustTolerance;
+        dustTolerance = newDustTolerance;
+        emit DustToleranceUpdated(oldDustTolerance, newDustTolerance);
     }
 
     /// @notice Gets the current market price from Uniswap for a token
@@ -1402,5 +1670,70 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 oldDeviation = maxPriceDeviation;
         maxPriceDeviation = newDeviation;
         emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);
+    }
+
+    /// @notice Emergency function to withdraw specific amount of ETH from the contract
+    /// @param recipient Address to receive the ETH
+    /// @param amount Amount of ETH to withdraw
+    /// @dev Only callable by contract owner in emergency situations
+    function emergencyWithdrawETHAmount(
+        address payable recipient,
+        uint256 amount
+    ) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be greater than 0");
+        require(address(this).balance >= amount, "Insufficient ETH balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "ETH withdrawal failed");
+
+        emit EmergencyWithdrawETH(recipient, amount);
+    }
+
+    /// @notice Emergency function to withdraw specific amount of tokens from the contract
+    /// @param token Address of the token to withdraw
+    /// @param recipient Address to receive the tokens
+    /// @param amount Amount of tokens to withdraw
+    /// @dev Only callable by contract owner in emergency situations
+    function emergencyWithdrawTokenAmount(
+        address token,
+        address recipient,
+        uint256 amount
+    ) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be greater than 0");
+
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance >= amount, "Insufficient token balance");
+
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit EmergencyWithdrawToken(token, recipient, amount);
+    }
+
+    /// @notice Emergency function to withdraw multiple tokens at once
+    /// @param tokens Array of token addresses to withdraw
+    /// @param recipient Address to receive all tokens
+    /// @dev Only callable by contract owner in emergency situations
+    /// @dev More gas efficient than calling emergencyWithdrawToken multiple times
+    function emergencyWithdrawMultipleTokens(
+        address[] calldata tokens,
+        address recipient
+    ) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(tokens.length > 0, "No tokens specified");
+        require(tokens.length <= 20, "Too many tokens to withdraw at once");
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            require(token != address(0), "Invalid token address");
+
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(token).safeTransfer(recipient, balance);
+                emit EmergencyWithdrawToken(token, recipient, balance);
+            }
+        }
     }
 }
