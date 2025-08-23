@@ -2,5 +2,6 @@
   "GradientProtocol#GradientRegistry": "0x604D5cBe788CBA5115Ffd3E2407BD4C4B7F81a1e",
   "GradientProtocol#FallbackExecutor": "0x6e9eDd5a02C5901193Ab1Dcf8af40A78Db5BbDCb",
   "GradientProtocol#GradientMarketMakerPool": "0xbD99f3cFdf13e3B1e22D14c1cAf04A3afa212cF1",
-  "GradientProtocol#GradientOrderbook": "0x34370cB1d018d65c0fFaa9a042b2897a0054A353"
+  "GradientProtocol#GradientOrderbook": "0x34370cB1d018d65c0fFaa9a042b2897a0054A353",
+  "OrderbookUpgrade#GradientOrderbook": "0xf0449A03FDf282247C8a041ac55C0C18A432FB27"
 }

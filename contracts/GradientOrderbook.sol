@@ -1575,8 +1575,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(reserveETH > 0 && reserveToken > 0, "Insufficient liquidity");
 
         // Calculate price: ETH per token (18 decimals)
-        // Price = (reserveETH * 1e18) / reserveToken
-        marketPrice = (reserveETH * 1e18) / reserveToken;
+        uint8 decimals = IERC20Metadata(token).decimals();
+
+        if (decimals == 18) {
+            // If token has 18 decimals, calculate directly
+            marketPrice = (reserveETH * 1e18) / reserveToken;
+        } else if (decimals < 18) {
+            uint256 scalingFactor = 10 ** (18 - decimals);
+            uint256 scaledReserveETH = reserveETH / scalingFactor;
+            marketPrice = (scaledReserveETH * 1e18) / reserveToken;
+        } else {
+            uint256 scalingFactor = 10 ** (decimals - 18);
+            uint256 scaledReserveToken = reserveToken / scalingFactor;
+            marketPrice = (reserveETH * 1e18) / scaledReserveToken;
+        }
 
         // Ensure we have a reasonable price (not zero or extremely small)
         require(marketPrice > 0, "Invalid market price calculated");
@@ -1666,7 +1678,14 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @param newDeviation New maximum price deviation in basis points (1 = 0.01%)
     /// @dev Only callable by contract owner
     function updateMaxPriceDeviation(uint256 newDeviation) external onlyOwner {
-        require(newDeviation <= 10000, "Deviation too high");
+        require(
+            newDeviation <= 100000, // 1000% = 100000 basis points
+            "Deviation too high"
+        );
+
+        // Add a minimum deviation check to prevent setting it too low
+        require(newDeviation >= 10, "Deviation too low (min 0.1%)");
+
         uint256 oldDeviation = maxPriceDeviation;
         maxPriceDeviation = newDeviation;
         emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);

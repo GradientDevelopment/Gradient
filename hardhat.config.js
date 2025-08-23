@@ -22,8 +22,8 @@ module.exports = {
       chainId: 31337
     },
     mainnet: {
-      // url: `https://eth-mainnet.g.alchemy.com/v2/${process.env.MAIN_ALCHEMY_KEY}`,
-      url: `https://snowy-convincing-frost.quiknode.pro/${process.env.QUICKNODE_API_KEY}`,
+      url: `https://eth-mainnet.g.alchemy.com/v2/${process.env.MAIN_ALCHEMY_KEY}`,
+      // url: `https://snowy-convincing-frost.quiknode.pro/${process.env.QUICKNODE_API_KEY}`,
       accounts: [privateKey],
       allowUnlimitedContractSize: true,
     },
