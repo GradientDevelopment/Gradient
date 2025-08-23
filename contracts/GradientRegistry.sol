@@ -15,7 +15,7 @@ contract GradientRegistry is AccessControl {
     bytes32 public constant TIMELOCK_ROLE = keccak256("TIMELOCK_ROLE");
 
     // Contract addresses
-    address public marketMakerPool;
+    address public marketMakerFactory;
     address public gradientToken;
     address public orderbook;
     address public fallbackExecutor;
@@ -145,9 +145,9 @@ contract GradientRegistry is AccessControl {
         bytes32 nameHash = keccak256(bytes(contractName));
         address oldAddress;
 
-        if (nameHash == keccak256(bytes("MarketMakerPool"))) {
-            oldAddress = marketMakerPool;
-            marketMakerPool = newAddress;
+        if (nameHash == keccak256(bytes("MarketMakerFactory"))) {
+            oldAddress = marketMakerFactory;
+            marketMakerFactory = newAddress;
         } else if (nameHash == keccak256(bytes("GradientToken"))) {
             oldAddress = gradientToken;
             gradientToken = newAddress;
@@ -236,7 +236,7 @@ contract GradientRegistry is AccessControl {
 
     /**
      * @notice Set the main contract addresses (legacy function, requires timelock)
-     * @param _marketMakerPool Address of the MarketMakerPool contract
+     * @param _marketMakerFactory Address of the MarketMakerFactory contract
      * @param _gradientToken Address of the Gradient token contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
@@ -244,15 +244,15 @@ contract GradientRegistry is AccessControl {
      * @dev This function now schedules changes instead of executing immediately
      */
     function setMainContracts(
-        address _marketMakerPool,
+        address _marketMakerFactory,
         address _gradientToken,
         address _orderbook,
         address _fallbackExecutor,
         address _router
     ) external onlyRole(ADMIN_ROLE) {
         require(
-            _marketMakerPool != address(0),
-            "Invalid market maker pool address"
+            _marketMakerFactory != address(0),
+            "Invalid market maker factory address"
         );
         require(_gradientToken != address(0), "Invalid gradient token address");
         require(_orderbook != address(0), "Invalid orderbook address");
@@ -263,8 +263,11 @@ contract GradientRegistry is AccessControl {
         require(_router != address(0), "Invalid router address");
 
         if (!isContractsInitialized) {
-            _executeContractAddressChange("MarketMakerPool", _marketMakerPool);
-            isInitialized["MarketMakerPool"] = true;
+            _executeContractAddressChange(
+                "MarketMakerFactory",
+                _marketMakerFactory
+            );
+            isInitialized["MarketMakerFactory"] = true;
             _executeContractAddressChange("GradientToken", _gradientToken);
             isInitialized["GradientToken"] = true;
             _executeContractAddressChange("Orderbook", _orderbook);
@@ -282,7 +285,10 @@ contract GradientRegistry is AccessControl {
         }
 
         // Set each contract address (first-time setup will be immediate)
-        this.scheduleContractAddressChange("MarketMakerPool", _marketMakerPool);
+        this.scheduleContractAddressChange(
+            "MarketMakerFactory",
+            _marketMakerFactory
+        );
         this.scheduleContractAddressChange("GradientToken", _gradientToken);
         this.scheduleContractAddressChange("Orderbook", _orderbook);
         this.scheduleContractAddressChange(
@@ -340,7 +346,7 @@ contract GradientRegistry is AccessControl {
 
     /**
      * @notice Get all main contract addresses
-     * @return _marketMakerPool Address of the MarketMakerPool contract
+     * @return _marketMakerFactory Address of the MarketMakerFactory contract
      * @return _gradientToken Address of the Gradient token contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
@@ -350,7 +356,7 @@ contract GradientRegistry is AccessControl {
         external
         view
         returns (
-            address _marketMakerPool,
+            address _marketMakerFactory,
             address _gradientToken,
             address _orderbook,
             address _fallbackExecutor,
@@ -358,12 +364,20 @@ contract GradientRegistry is AccessControl {
         )
     {
         return (
-            marketMakerPool,
+            marketMakerFactory,
             gradientToken,
             orderbook,
             fallbackExecutor,
             router
         );
+    }
+
+    /**
+     * @notice Get the market maker factory contract address
+     * @return address The market maker factory contract address
+     */
+    function getMarketMakerFactory() external view returns (address) {
+        return marketMakerFactory;
     }
 
     /**

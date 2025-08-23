@@ -1,0 +1,7 @@
+{
+  "GradientProtocolTestnet#GradientRegistry": "0xbD1c57E9deaBCAc45CF9447AC94Af9cD1288357B",
+  "GradientProtocolTestnet#GradientMarketMakerFactory": "0x71c5Abe22a294fcCcb91cE45F1b77abD4925C878",
+  "GradientProtocolTestnet#FallbackExecutor": "0x678A841476c0c087D9a2D642269d2CbbEB6e702B",
+  "GradientProtocolTestnet#GradientOrderbook": "0x7c13B2e3CF60d6ddB7B1dB8D6D30CD313a7fbBa8",
+  "GradientProtocolTestnet#EventAggregator": "0x90E2e3460FD773D24F9cB6C8f328EBd8aF92B38F"
+}

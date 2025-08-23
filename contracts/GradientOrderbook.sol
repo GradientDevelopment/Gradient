@@ -6,12 +6,13 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
-import {IGradientMarketMakerPool} from "./interfaces/IGradientMarketMakerPool.sol";
+import {IGradientMarketMakerPoolV2} from "./interfaces/IGradientMarketMakerPoolV2.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
+import {GradientMarketMakerFactory} from "./GradientMarketMakerFactory.sol";
 
 /**
  * @title GradientOrderbook
@@ -885,11 +886,13 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @param orderIds Array of order IDs to fulfill
     /// @param fillAmounts Array of fill amounts for each order
     /// @param executionPrices Array of execution prices for each order
+    /// @param merkleRoot The merkle root to use for position updates
     /// @dev Only whitelisted fulfillers can call this function
     function fulfillOrdersWithMarketMaker(
         uint256[] calldata orderIds,
         uint256[] calldata fillAmounts,
-        uint256[] calldata executionPrices
+        uint256[] calldata executionPrices,
+        bytes32 merkleRoot
     ) external nonReentrant onlyAuthorizedFulfiller {
         require(orderIds.length > 0, "No orders to fulfill");
         require(
@@ -907,7 +910,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             _fulfillOrderWithMarketMaker(
                 orderIds[i],
                 fillAmounts[i],
-                executionPrices[i]
+                executionPrices[i],
+                merkleRoot
             );
         }
     }
@@ -916,10 +920,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @param orderId ID of the order to fulfill
     /// @param fillAmount Amount of tokens to fill
     /// @param executionPrice The price at which the order will be executed
+    /// @param merkleRoot The merkle root to use for position updates
     function _fulfillOrderWithMarketMaker(
         uint256 orderId,
         uint256 fillAmount,
-        uint256 executionPrice
+        uint256 executionPrice,
+        bytes32 merkleRoot
     ) internal validateMarketOrderPrice(orderId, executionPrice) {
         Order storage order = orders[orderId];
 
@@ -933,9 +939,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Execution price deviates too much from market price"
         );
 
-        // Get market maker pool address from registry
-        address marketMakerPool = gradientRegistry.marketMakerPool();
-        require(marketMakerPool != address(0), "Market maker pool not set");
+        // Get market maker factory from registry and then get the pool for this specific token
+        address marketMakerFactory = gradientRegistry.marketMakerFactory();
+        require(
+            marketMakerFactory != address(0),
+            "Market maker factory not set"
+        );
+
+        // Get the pool for this specific token
+        address marketMakerPool = GradientMarketMakerFactory(marketMakerFactory)
+            .getPool(order.token);
+        require(
+            marketMakerPool != address(0),
+            "Market maker pool not found for token"
+        );
 
         // Calculate actual fill amount based on remaining amount
         uint256 remainingAmount;
@@ -960,30 +977,34 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (order.orderType == OrderType.Buy) {
             // Buy order from order to get tokens from market maker pool
-            uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
-                .currentTokenEpochs(order.token);
+            // Note: V2 doesn't use epochs, so we don't need to get epoch information
 
             // Collect fee from buyer BEFORE sending ETH to market maker
             uint256 buyerFee = _collectFee(paymentAmount);
             uint256 netPaymentAmount = paymentAmount - buyerFee;
 
             // For buy orders: orderbook sends ETH to market maker, receives tokens
-            IGradientMarketMakerPool(marketMakerPool).executeBuyOrder{
+            IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
                 value: netPaymentAmount
-            }(order.token, netPaymentAmount, actualFillAmount);
+            }(
+                netPaymentAmount,
+                actualFillAmount,
+                merkleRoot // Pass the current merkle root
+            );
 
             // Distribute market maker fee from already collected fees
             uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
                 DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
+                // V2 distributePoolFee doesn't take token/epoch parameters
+                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
                     value: feeForPool
-                }(order.token, epoch, false);
+                }();
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
-                    epoch,
+                    0, // No epochs in V2
                     feeForPool,
                     buyerFee
                 );
@@ -1006,8 +1027,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
         } else {
             // Sell order from order to get ETH from market maker pool
-            uint256 epoch = IGradientMarketMakerPool(marketMakerPool)
-                .currentETHEpochs(order.token);
+            // Note: V2 doesn't use epochs, so we don't need to get epoch information
 
             // Denormalize the amount for token approval
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
@@ -1019,10 +1039,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             IERC20(order.token).approve(marketMakerPool, actualTokenAmount);
 
             // Execute sell order - Orderbook sends tokens, receives ETH
-            IGradientMarketMakerPool(marketMakerPool).executeSellOrder(
-                order.token,
+            IGradientMarketMakerPoolV2(marketMakerPool).executeSellOrder(
                 paymentAmount,
-                actualTokenAmount
+                actualTokenAmount,
+                merkleRoot // Pass the current merkle root
             );
 
             // Collect fee from ETH received
@@ -1033,13 +1053,14 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPool(marketMakerPool).distributePoolFee{
+                // V2 distributePoolFee doesn't take parameters
+                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
                     value: feeForPool
-                }(order.token, epoch, true); // Distribute to ETH pool for sell orders
+                }();
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
-                    epoch,
+                    0, // No epochs in V2
                     feeForPool,
                     fee
                 );
@@ -1576,7 +1597,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Calculate price: ETH per token (18 decimals)
         // Price = (reserveETH * 1e18) / reserveToken
-        marketPrice = (reserveETH * 1e18) / reserveToken;
+        uint8 decimals = IERC20Metadata(token).decimals();
+        uint256 adjustedReserveToken = reserveToken * (10 ** (18 - decimals));
+
+        marketPrice = (reserveETH * 1e18) / adjustedReserveToken;
 
         // Ensure we have a reasonable price (not zero or extremely small)
         require(marketPrice > 0, "Invalid market price calculated");

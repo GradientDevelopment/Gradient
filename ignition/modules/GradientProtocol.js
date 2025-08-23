@@ -9,9 +9,9 @@ module.exports = buildModule("GradientProtocol", (m) => {
   const deployer = m.getAccount(0); // Automatically gets the first signer
   const gradientRegistry = m.contract("GradientRegistry", [], {});
 
-  // 2. Deploy GradientMarketMakerPool (depends on registry)
-  const gradientMarketMakerPool = m.contract(
-    "GradientMarketMakerPool",
+  // 2. Deploy GradientMarketMakerFactory (depends on registry)
+  const gradientMarketMakerFactory = m.contract(
+    "GradientMarketMakerFactory",
     [gradientRegistry],
     {}
   );
@@ -32,7 +32,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
 
   // 5. Configure the registry with all contract addresses
   m.call(gradientRegistry, "setMainContracts", [
-    gradientMarketMakerPool, // marketMakerPool
+    gradientMarketMakerFactory, // marketMakerPool (now factory)
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
     gradientOrderbook, // orderbook
     fallbackExecutor, // fallbackExecutor
@@ -55,9 +55,9 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // Set MM fee distribution percentage (70%)
   m.call(gradientOrderbook, "updateMMFeeDistributionPercentage", [7000]);
 
-  // 8. Configure market maker pool
-  // Set up initial pool configuration (if needed)
-  // Note: Pools are created dynamically when liquidity is provided
+  // 8. Configure market maker factory
+  // Note: Individual pools are created dynamically when liquidity is provided
+  // Initial pools can be created here if needed
 
   // 9. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
@@ -65,7 +65,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
     true, // authorized
   ]);
 
-  // 10. Set orderbook as reward distributor (so it can distribute fees to MM pool)
+  // 10. Set orderbook as reward distributor (so it can distribute fees to MM pools)
   m.call(gradientRegistry, "setRewardDistributor", [
     gradientOrderbook, // orderbook address
   ]);
@@ -80,7 +80,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
 
   return {
     gradientRegistry,
-    gradientMarketMakerPool,
+    gradientMarketMakerFactory,
     fallbackExecutor,
     gradientOrderbook,
   };
