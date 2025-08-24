@@ -1596,11 +1596,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(reserveETH > 0 && reserveToken > 0, "Insufficient liquidity");
 
         // Calculate price: ETH per token (18 decimals)
-        // Price = (reserveETH * 1e18) / reserveToken
         uint8 decimals = IERC20Metadata(token).decimals();
-        uint256 adjustedReserveToken = reserveToken * (10 ** (18 - decimals));
 
-        marketPrice = (reserveETH * 1e18) / adjustedReserveToken;
+        if (decimals == 18) {
+            // If token has 18 decimals, calculate directly
+            marketPrice = (reserveETH * 1e18) / reserveToken;
+        } else if (decimals < 18) {
+            uint256 scalingFactor = 10 ** (18 - decimals);
+            uint256 scaledReserveETH = reserveETH / scalingFactor;
+            marketPrice = (scaledReserveETH * 1e18) / reserveToken;
+        } else {
+            uint256 scalingFactor = 10 ** (decimals - 18);
+            uint256 scaledReserveToken = reserveToken / scalingFactor;
+            marketPrice = (reserveETH * 1e18) / scaledReserveToken;
+        }
 
         // Ensure we have a reasonable price (not zero or extremely small)
         require(marketPrice > 0, "Invalid market price calculated");
