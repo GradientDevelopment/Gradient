@@ -187,7 +187,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     event FeeDistributedToPool(
         address indexed marketMakerPool,
         address indexed token,
-        uint256 epoch,
         uint256 amount,
         uint256 totalFee
     );
@@ -269,11 +268,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
-        feePercentage = 50; // Default 0.5%
+        feePercentage = 50;
 
-        minOrderSize = 1e6; // Example: 0.000001 ETH
-        maxOrderSize = 1000 ether; // Example: 1000 ETH
-        maxOrderTtl = 30 days; // Example: 30 days
+        minOrderSize = 1e6;
+        maxOrderSize = 1000 ether;
+        maxOrderTtl = 30 days;
     }
 
     receive() external payable {}
@@ -302,7 +301,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     ) internal {
         bytes32 queueKey = _getQueueKey(token, orderType, executionType);
 
-        // new Queue system
         linkedOrders[queueKey][orderId] = LinkedOrder({
             prev: tailOrder[queueKey],
             next: 0,
@@ -312,7 +310,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         if (tailOrder[queueKey] != 0) {
             linkedOrders[queueKey][tailOrder[queueKey]].next = orderId;
         } else {
-            headOrder[queueKey] = orderId; // First order
+            headOrder[queueKey] = orderId;
         }
 
         tailOrder[queueKey] = orderId;
@@ -332,13 +330,13 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         if (node.prev != 0) {
             linkedOrders[queueKey][node.prev].next = node.next;
         } else {
-            headOrder[queueKey] = node.next; // Head being removed
+            headOrder[queueKey] = node.next;
         }
 
         if (node.next != 0) {
             linkedOrders[queueKey][node.next].prev = node.prev;
         } else {
-            tailOrder[queueKey] = node.prev; // Tail being removed
+            tailOrder[queueKey] = node.prev;
         }
 
         delete linkedOrders[queueKey][orderId];
@@ -371,7 +369,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Normalize token amount to 18 decimals for consistent price calculations
         uint256 normalizedAmount = normalizeTo18Decimals(amount, token);
 
-        // Check for overflow in price calculation
         require(
             normalizedAmount <= type(uint256).max / price,
             "Price calculation would overflow"
@@ -380,7 +377,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(totalCost >= minOrderSize, "Order too small");
         require(totalCost <= maxOrderSize, "Order too large");
 
-        // For buy orders, require ETH payment including potential fee
         if (orderType == OrderType.Buy) {
             require(msg.value >= totalCost, "Insufficient ETH sent");
         } else {
@@ -405,7 +401,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             status: OrderStatus.Active
         });
 
-        // Add to the appropriate queue based on execution type
         _addOrderToQueue(orderId, token, orderType, executionType);
 
         emit OrderCreated(
@@ -421,7 +416,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             objectId
         );
 
-        // Return excess ETH for buy orders
         if (orderType == OrderType.Buy && msg.value > totalCost) {
             (bool success, ) = msg.sender.call{value: msg.value - totalCost}(
                 ""
@@ -444,16 +438,13 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         require(!isOrderExpired(orderId), "Order expired");
 
         order.status = OrderStatus.Cancelled;
-        // If it was a buy order, return the ETH including potential fee
         if (order.orderType == OrderType.Buy) {
             uint256 refundAmount;
             if (order.executionType == OrderExecutionType.Market) {
-                // For market buy orders, refund remaining ETH
                 refundAmount = order.ethAmount > order.ethSpent
                     ? (order.ethAmount - order.ethSpent)
                     : 0;
             } else {
-                // For limit buy orders, calculate based on remaining tokens
                 uint256 remainingAmount = order.amount > order.filledAmount
                     ? (order.amount - order.filledAmount)
                     : 0;
@@ -467,14 +458,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 (bool success, ) = order.owner.call{value: refundAmount}("");
                 require(success, "ETH refund failed");
             }
-        }
-        // If it was a sell order, return the tokens
-        else {
+        } else {
             uint256 remainingAmount = order.amount > order.filledAmount
                 ? (order.amount - order.filledAmount)
                 : 0;
             if (remainingAmount > 0) {
-                // Denormalize the remaining amount back to token decimals
                 uint256 actualRemainingAmount = denormalizeFrom18Decimals(
                     remainingAmount,
                     order.token
@@ -522,7 +510,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
             order.status = OrderStatus.Expired;
 
-            // If it was a sell order, return the tokens
             if (order.orderType == OrderType.Sell) {
                 uint256 remainingAmount = order.amount > order.filledAmount
                     ? (order.amount - order.filledAmount)
@@ -543,12 +530,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             if (order.orderType == OrderType.Buy) {
                 uint256 refundAmount;
                 if (order.executionType == OrderExecutionType.Market) {
-                    // For market buy orders, refund remaining ETH
                     refundAmount = order.ethAmount > order.ethSpent
                         ? (order.ethAmount - order.ethSpent)
                         : 0;
                 } else {
-                    // For limit buy orders, calculate based on remaining tokens
                     uint256 remainingAmount = order.amount > order.filledAmount
                         ? (order.amount - order.filledAmount)
                         : 0;
@@ -559,7 +544,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                         address(this).balance >= refundAmount,
                         "Insufficient ETH in contract"
                     );
-                    // Refund the ETH
                     (bool success, ) = payable(order.owner).call{
                         value: refundAmount
                     }("");
@@ -664,7 +648,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Price mismatch for limit orders"
         );
 
-        // Calculate actual fill amount based on remaining amounts
         uint256 buyRemaining = buyOrder.amount > buyOrder.filledAmount
             ? (buyOrder.amount - buyOrder.filledAmount)
             : 0;
@@ -673,7 +656,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             : 0;
         uint256 actualFillAmount = _match.fillAmount;
 
-        // Adjust fill amount if it exceeds either order's remaining amount
         if (actualFillAmount > buyRemaining) {
             actualFillAmount = buyRemaining;
         }
@@ -683,7 +665,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         require(actualFillAmount > 0, "No amount to fill");
 
-        // Calculate token amounts and fees
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18; // Use sell price for limit orders
 
@@ -691,15 +672,11 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 buyerFee = _collectFee(paymentAmount);
         uint256 sellerFee = _collectFee(paymentAmount);
 
-        // Calculate final amounts after fees
         uint256 sellerPayment = paymentAmount - sellerFee;
 
-        // Execute transfers
-        // 1. Transfer ETH from contract to seller (minus seller fee)
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
-        // 2. Transfer traded tokens from contract to buyer
         {
             uint256 tokenFee = (buyerFee * 1e18) / sellOrder.price;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
@@ -716,11 +693,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
         }
 
-        // Update order states
         buyOrder.filledAmount += actualFillAmount;
         sellOrder.filledAmount += actualFillAmount;
 
-        // Return excess ETH to buyer if using a lower sell price
         if (buyOrder.price > sellOrder.price) {
             uint256 savedAmount = (actualFillAmount *
                 (buyOrder.price - sellOrder.price)) / 1e18;
@@ -728,7 +703,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             require(success, "ETH savings return failed");
         }
 
-        // Update order statuses and remove from queues if fully filled
         _updateOrderStatus(
             _match.buyOrderId,
             actualFillAmount,
@@ -776,7 +750,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Not market orders"
         );
 
-        // Handle different fulfillment types
         _fulfillMarketOrdersMatching(_match, executionPrice);
     }
 
@@ -796,7 +769,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Execution price deviates too much from market price"
         );
 
-        // Validate execution price
         if (buyOrder.executionType == OrderExecutionType.Market) {
             require(
                 executionPrice <= buyOrder.price,
@@ -810,7 +782,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
         }
 
-        // Calculate actual fill amount based on remaining amounts
         uint256 buyRemaining = getBuyOrderRemainingAmount(
             buyOrder,
             executionPrice
@@ -829,7 +800,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         require(actualFillAmount > 0, "No amount to fill");
 
-        // Calculate token amounts and fees
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
 
@@ -840,12 +810,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         // Calculate final amounts after fees
         uint256 sellerPayment = paymentAmount - sellerFee;
 
-        // Execute transfers
-        // 1. Transfer ETH from contract to seller (minus seller fee)
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
-        // 2. Transfer traded tokens from contract to buyer
         {
             uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
@@ -862,7 +829,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
         }
 
-        // Update order states
         buyOrder.filledAmount += actualFillAmount;
         // Track actual ETH spent for buy market orders
         if (
@@ -873,7 +839,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
         sellOrder.filledAmount += actualFillAmount;
 
-        // Update order statuses and remove from queues if fully filled
         _updateOrderStatus(_match.buyOrderId, actualFillAmount, executionPrice);
         _updateOrderStatus(
             _match.sellOrderId,
@@ -939,14 +904,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             "Execution price deviates too much from market price"
         );
 
-        // Get market maker factory from registry and then get the pool for this specific token
         address marketMakerFactory = gradientRegistry.marketMakerFactory();
         require(
             marketMakerFactory != address(0),
             "Market maker factory not set"
         );
 
-        // Get the pool for this specific token
         address marketMakerPool = GradientMarketMakerFactory(marketMakerFactory)
             .getPool(order.token);
         require(
@@ -977,38 +940,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (order.orderType == OrderType.Buy) {
             // Buy order from order to get tokens from market maker pool
-            // Note: V2 doesn't use epochs, so we don't need to get epoch information
-
-            // Collect fee from buyer BEFORE sending ETH to market maker
             uint256 buyerFee = _collectFee(paymentAmount);
             uint256 netPaymentAmount = paymentAmount - buyerFee;
-
-            // For buy orders: orderbook sends ETH to market maker, receives tokens
-            IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
-                value: netPaymentAmount
-            }(
-                netPaymentAmount,
-                actualFillAmount,
-                merkleRoot // Pass the current merkle root
-            );
-
-            // Distribute market maker fee from already collected fees
-            uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
-                DIVISOR;
-            totalFeesCollected -= feeForPool;
-            if (feeForPool > 0) {
-                // V2 distributePoolFee doesn't take token/epoch parameters
-                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
-                    value: feeForPool
-                }();
-                emit FeeDistributedToPool(
-                    marketMakerPool,
-                    order.token,
-                    0, // No epochs in V2
-                    feeForPool,
-                    buyerFee
-                );
-            }
 
             // Calculate token fee and deduct from received tokens
             uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
@@ -1021,14 +954,32 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 order.token
             );
 
+            // For buy orders: orderbook sends ETH to market maker, receives tokens
+            IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
+                value: netPaymentAmount
+            }(netPaymentAmount, actualFillAmount, merkleRoot);
+
+            // Distribute market maker fee from already collected fees
+            uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
+                DIVISOR;
+            totalFeesCollected -= feeForPool;
+            if (feeForPool > 0) {
+                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
+                    value: feeForPool
+                }();
+                emit FeeDistributedToPool(
+                    marketMakerPool,
+                    order.token,
+                    feeForPool,
+                    buyerFee
+                );
+            }
+
             IERC20(order.token).safeTransfer(
                 order.owner,
                 actualTokenAmount - actualTokenFee
             );
         } else {
-            // Sell order from order to get ETH from market maker pool
-            // Note: V2 doesn't use epochs, so we don't need to get epoch information
-
             // Denormalize the amount for token approval
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
                 actualFillAmount,
@@ -1053,14 +1004,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
             totalFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                // V2 distributePoolFee doesn't take parameters
                 IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
                     value: feeForPool
                 }();
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
-                    0, // No epochs in V2
                     feeForPool,
                     fee
                 );

@@ -14,7 +14,7 @@ import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IEventAggregator} from "./interfaces/IEventAggregator.sol";
 
-// Custom errors to save gas and reduce contract size
+// Custom errors
 error InvalidTokenAddress();
 error TokenBlocked();
 error OnlyRewardDistributor();
@@ -352,6 +352,16 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         address user,
         uint256 newETHPosition
     ) internal {
+        // Calculate pending rewards BEFORE updating position to preserve earned fees
+        uint256 pendingReward = 0;
+        if (ethProviders[user].ethLPShares > 0) {
+            pendingReward =
+                (ethProviders[user].ethLPShares * accRewardPerShare) /
+                SCALE -
+                ethProviders[user].rewardDebt;
+            ethProviders[user].pendingRewards += pendingReward;
+        }
+
         // Update user's last update version for ETH provider
         ethProviders[user].lastUpdateVersion = currentVersion;
 
@@ -366,6 +376,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             // If pool is empty, LP shares = position
             ethProviders[user].ethLPShares = newETHPosition;
         }
+
+        // Update reward debt for the new LP shares to ensure accurate future reward calculations
+        ethProviders[user].rewardDebt =
+            (ethProviders[user].ethLPShares * accRewardPerShare) /
+            SCALE;
     }
 
     /**
@@ -377,6 +392,17 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         address user,
         uint256 newTokenPosition
     ) internal {
+        // Calculate pending rewards BEFORE updating position to preserve earned fees
+        uint256 pendingReward = 0;
+        if (tokenProviders[user].tokenLPShares > 0) {
+            pendingReward =
+                (tokenProviders[user].tokenLPShares *
+                    accTokenProviderRewardPerShare) /
+                SCALE -
+                tokenProviders[user].rewardDebt;
+            tokenProviders[user].pendingRewards += pendingReward;
+        }
+
         // Update user's last update version for token provider
         tokenProviders[user].lastUpdateVersion = currentVersion;
 
@@ -391,6 +417,12 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             // If pool is empty, LP shares = position
             tokenProviders[user].tokenLPShares = newTokenPosition;
         }
+
+        // Update reward debt for the new LP shares to ensure accurate future reward calculations
+        tokenProviders[user].rewardDebt =
+            (tokenProviders[user].tokenLPShares *
+                accTokenProviderRewardPerShare) /
+            SCALE;
     }
 
     /**
