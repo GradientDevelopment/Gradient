@@ -967,10 +967,25 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 buyerFee = _collectFee(paymentAmount);
             uint256 netPaymentAmount = paymentAmount - buyerFee;
 
+            // Calculate token fee and deduct from received tokens
+            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
+            uint256 actualTokenAmount = denormalizeFrom18Decimals(
+                actualFillAmount,
+                order.token
+            );
+            uint256 actualTokenFee = denormalizeFrom18Decimals(
+                tokenFee,
+                order.token
+            );
+
             // For buy orders: orderbook sends ETH to market maker, receives tokens
             IGradientMarketMakerPool(marketMakerPool).executeBuyOrder{
                 value: netPaymentAmount
-            }(order.token, netPaymentAmount, actualFillAmount);
+            }(
+                order.token,
+                netPaymentAmount,
+                actualTokenAmount - actualTokenFee
+            );
 
             // Distribute market maker fee from already collected fees
             uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
@@ -988,17 +1003,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                     buyerFee
                 );
             }
-
-            // Calculate token fee and deduct from received tokens
-            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
-            uint256 actualTokenAmount = denormalizeFrom18Decimals(
-                actualFillAmount,
-                order.token
-            );
-            uint256 actualTokenFee = denormalizeFrom18Decimals(
-                tokenFee,
-                order.token
-            );
 
             IERC20(order.token).safeTransfer(
                 order.owner,
