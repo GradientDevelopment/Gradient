@@ -957,7 +957,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             // For buy orders: orderbook sends ETH to market maker, receives tokens
             IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
                 value: netPaymentAmount
-            }(netPaymentAmount, actualFillAmount, merkleRoot);
+            }(netPaymentAmount, actualTokenAmount - actualTokenFee, merkleRoot);
 
             // Distribute market maker fee from already collected fees
             uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
