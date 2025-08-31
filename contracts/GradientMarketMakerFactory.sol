@@ -93,10 +93,10 @@ contract GradientMarketMakerFactory is Ownable {
      */
     function _getPoolBytecode(
         address token
-    ) internal pure returns (bytes memory bytecode) {
+    ) internal view returns (bytes memory bytecode) {
         bytecode = abi.encodePacked(
             type(GradientMarketMakerPoolV2).creationCode,
-            abi.encode(IERC20(token))
+            abi.encode(IERC20(token), owner())
         );
     }
 
@@ -163,7 +163,6 @@ contract GradientMarketMakerFactory is Ownable {
         if (getPool[token] != address(0)) revert PoolAlreadyExists();
         if (gradientRegistry.blockedTokens(token)) revert TokenBlocked();
         if (msg.value != initialEthAmount) revert EthAmountMismatch();
-        if (initialTokenAmount == 0) revert TokenAmountZero();
 
         // Create the pool using CREATE2
         bytes32 salt = _calculateSalt(token);

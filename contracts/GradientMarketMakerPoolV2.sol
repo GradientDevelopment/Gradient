@@ -179,6 +179,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     event MinTokenLiquidityUpdated(uint256 newMinTokenLiquidity);
 
     event MerkleRootUpdated(uint256 indexed version, bytes32 merkleRoot);
+    event MerkleRootUpdateSkipped(uint256 indexed version, string reason);
     event UserPositionUpdated(
         address indexed user,
         uint256 indexed version,
@@ -207,8 +208,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         _;
     }
 
-    constructor(IERC20 _token) Ownable(msg.sender) {
+    constructor(IERC20 _token, address _owner) Ownable(_owner) {
         if (address(_token) == address(0)) revert InvalidTokenAddress();
+        if (_owner == address(0)) revert InvalidRecipient();
 
         token = _token;
         factory = IGradientMarketMakerFactory(msg.sender);
@@ -340,6 +342,13 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             abi.encodePacked(user, newETHPosition, newTokenPosition)
         );
 
+        // Special handling for single provider case
+        if (proof.length == 0) {
+            // For single provider, verify that the leaf equals the merkle root
+            return leaf == merkleRoot;
+        }
+
+        // For multiple providers, use standard merkle proof verification
         return MerkleProof.verify(proof, merkleRoot, leaf);
     }
 
@@ -362,16 +371,31 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             ethProviders[user].pendingRewards += pendingReward;
         }
 
+        // Store old LP shares before updating
+        uint256 oldUserLPShares = ethProviders[user].ethLPShares;
+
         // Update user's last update version for ETH provider
         ethProviders[user].lastUpdateVersion = currentVersion;
 
         // Update ETH provider position and calculate corresponding LP shares
         ethProviders[user].ethPosition = newETHPosition;
         if (totalETH > 0 && totalETHLPShares > 0) {
-            // Calculate LP shares based on position and current pool ratio
-            ethProviders[user].ethLPShares =
-                (newETHPosition * totalETHLPShares) /
+            // Calculate new LP shares based on position and current pool ratio
+            uint256 newUserLPShares = (newETHPosition * totalETHLPShares) /
                 totalETH;
+
+            // Update totalETHLPShares by the difference (old - old + new = new - old)
+            totalETHLPShares =
+                totalETHLPShares -
+                oldUserLPShares +
+                newUserLPShares;
+
+            // Set user's new LP shares
+            ethProviders[user].ethLPShares = newUserLPShares;
+        } else if (totalETH > 0 && totalETHLPShares == 0) {
+            // First user getting ETH position after trade - initialize
+            ethProviders[user].ethLPShares = newETHPosition;
+            totalETHLPShares = newETHPosition;
         } else {
             // If pool is empty, LP shares = position
             ethProviders[user].ethLPShares = newETHPosition;
@@ -403,16 +427,31 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenProviders[user].pendingRewards += pendingReward;
         }
 
+        // Store old LP shares before updating
+        uint256 oldUserLPShares = tokenProviders[user].tokenLPShares;
+
         // Update user's last update version for token provider
         tokenProviders[user].lastUpdateVersion = currentVersion;
 
         // Update token provider position and calculate corresponding LP shares
         tokenProviders[user].tokenPosition = newTokenPosition;
         if (totalTokens > 0 && totalTokenLPShares > 0) {
-            // Calculate LP shares based on position and current pool ratio
-            tokenProviders[user].tokenLPShares =
-                (newTokenPosition * totalTokenLPShares) /
+            // Calculate new LP shares based on position and current pool ratio
+            uint256 newUserLPShares = (newTokenPosition * totalTokenLPShares) /
                 totalTokens;
+
+            // Update totalTokenLPShares by the difference (old - old + new = new - old)
+            totalTokenLPShares =
+                totalTokenLPShares -
+                oldUserLPShares +
+                newUserLPShares;
+
+            // Set user's new LP shares
+            tokenProviders[user].tokenLPShares = newUserLPShares;
+        } else if (totalTokens > 0 && totalTokenLPShares == 0) {
+            // First user getting token position after trade - initialize
+            tokenProviders[user].tokenLPShares = newTokenPosition;
+            totalTokenLPShares = newTokenPosition;
         } else {
             // If pool is empty, LP shares = position
             tokenProviders[user].tokenLPShares = newTokenPosition;
@@ -489,6 +528,60 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         );
     }
 
+    // =============================== INTERNAL HELPER FUNCTIONS ===============================
+
+    /**
+     * @notice Check if user needs position update for either asset type
+     * @param user User address to check
+     * @return needsUpdate True if user needs position update
+     */
+    function _needsPositionUpdate(address user) internal view returns (bool) {
+        return
+            (ethProviders[user].ethLPShares > 0 &&
+                ethProviders[user].lastUpdateVersion < currentVersion) ||
+            (tokenProviders[user].tokenLPShares > 0 &&
+                tokenProviders[user].lastUpdateVersion < currentVersion) ||
+            // Also check if user has pending rewards that need position update
+            (ethProviders[user].pendingRewards > 0 &&
+                ethProviders[user].lastUpdateVersion < currentVersion) ||
+            (tokenProviders[user].pendingRewards > 0 &&
+                tokenProviders[user].lastUpdateVersion < currentVersion);
+    }
+
+    /**
+     * @notice Check if an empty proof is valid for a user
+     * @dev Empty proofs are valid for single providers where the leaf equals the merkle root
+     * @param user User address
+     * @param proof Merkle proof array
+     * @param newETHPosition New ETH position
+     * @param newTokenPosition New token position
+     * @return isValid Whether the empty proof is valid for this user
+     */
+    function _isEmptyProofValid(
+        address user,
+        bytes32[] calldata proof,
+        uint256 newETHPosition,
+        uint256 newTokenPosition
+    ) internal view returns (bool isValid) {
+        // Empty proof is only valid if it's a single provider scenario
+        if (proof.length == 0) {
+            // Check if this user is the only provider
+            bool isUserOnlyProvider = (totalETHLPShares == 0 ||
+                ethProviders[user].ethLPShares == totalETHLPShares) &&
+                (totalTokenLPShares == 0 ||
+                    tokenProviders[user].tokenLPShares == totalTokenLPShares);
+
+            if (isUserOnlyProvider) {
+                // For single provider, verify that the leaf equals the merkle root
+                bytes32 leaf = keccak256(
+                    abi.encodePacked(user, newETHPosition, newTokenPosition)
+                );
+                return leaf == merkleRoot;
+            }
+        }
+        return false;
+    }
+
     // =============================== PUBLIC FUNCTIONS ===============================
 
     /**
@@ -521,6 +614,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         ethProviders[user].ethLPShares += lpSharesToMint;
         ethProviders[user].ethPosition += ethAmount;
+
+        // Initialize lastUpdateVersion for first-time liquidity providers
+        if (ethProviders[user].lastUpdateVersion == 0) {
+            ethProviders[user].lastUpdateVersion = currentVersion;
+        }
 
         // Update reward debt using only ETH LP shares
         ethProviders[user].rewardDebt =
@@ -582,6 +680,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         tokenProviders[user].tokenLPShares += lpSharesToMint;
         tokenProviders[user].tokenPosition += tokenAmount;
+
+        // Initialize lastUpdateVersion for first-time liquidity providers
+        if (tokenProviders[user].lastUpdateVersion == 0) {
+            tokenProviders[user].lastUpdateVersion = currentVersion;
+        }
 
         // Update reward debt using only token LP shares
         tokenProviders[user].rewardDebt =
@@ -656,14 +759,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -702,14 +814,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -747,14 +868,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -825,8 +955,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 lpSharesToBurn = (ethProviders[msg.sender].ethLPShares *
             shares) / 10000;
         if (lpSharesToBurn == 0) revert NoSharesToBurn();
-        if (lpSharesToBurn > ethProviders[msg.sender].ethLPShares)
-            revert InsufficientSharesToBurn();
+
+        // Ensure we don't burn more LP shares than the user actually has (prevent underflow)
+        if (lpSharesToBurn > ethProviders[msg.sender].ethLPShares) {
+            lpSharesToBurn = ethProviders[msg.sender].ethLPShares;
+        }
 
         // Calculate actual withdrawal amounts based on LP shares
         uint256 actualEthWithdraw = _calculateWithdrawalAmount(
@@ -835,6 +968,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             totalETHLPShares
         );
         if (actualEthWithdraw > totalETH) revert InsufficientPoolBalance();
+
+        // Ensure we don't withdraw more than the user's actual position (prevent underflow)
+        if (actualEthWithdraw > ethProviders[msg.sender].ethPosition) {
+            actualEthWithdraw = ethProviders[msg.sender].ethPosition;
+        }
 
         // Update balances
         ethProviders[msg.sender].ethPosition -= actualEthWithdraw;
@@ -899,8 +1037,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 lpSharesToBurn = (tokenProviders[msg.sender].tokenLPShares *
             shares) / 10000;
         if (lpSharesToBurn == 0) revert NoSharesToBurn();
-        if (lpSharesToBurn > tokenProviders[msg.sender].tokenLPShares)
-            revert InsufficientSharesToBurn();
+
+        // Ensure we don't burn more LP shares than the user actually has (prevent underflow)
+        if (lpSharesToBurn > tokenProviders[msg.sender].tokenLPShares) {
+            lpSharesToBurn = tokenProviders[msg.sender].tokenLPShares;
+        }
 
         // Calculate actual withdrawal amounts based on LP shares
         uint256 actualTokenWithdraw = _calculateWithdrawalAmount(
@@ -909,6 +1050,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             totalTokenLPShares
         );
         if (actualTokenWithdraw > totalTokens) revert InsufficientPoolBalance();
+
+        // Ensure we don't withdraw more than the user's actual position (prevent underflow)
+        if (actualTokenWithdraw > tokenProviders[msg.sender].tokenPosition) {
+            actualTokenWithdraw = tokenProviders[msg.sender].tokenPosition;
+        }
 
         // Update balances
         tokenProviders[msg.sender].tokenPosition -= actualTokenWithdraw;
@@ -985,8 +1131,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         // Pool provides tokens to orderbook
         totalTokens -= tokenAmount;
-        totalEthAdded += msg.value;
         totalTokensRemoved += tokenAmount;
+        totalETH += msg.value; // Update totalETH with incoming ETH from orderbook
+        totalEthAdded += msg.value;
 
         // Transfer tokens to orderbook
         if (tokenAmount > 0) {
@@ -1049,6 +1196,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Pool provides ETH to orderbook
         totalETH -= ethAmount;
         totalEthRemoved += ethAmount;
+        totalTokens += tokenAmount; // CRITICAL: Update totalTokens with incoming tokens from orderbook
         totalTokensAdded += tokenAmount;
 
         // Transfer ETH to orderbook
@@ -1249,10 +1397,21 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     ) external payable isNotBlocked nonReentrant {
         if (msg.value < minLiquidity) revert ETHAmountBelowMinimum();
 
-        // Check if user needs position update
-        if (ethProviders[msg.sender].lastUpdateVersion < currentVersion) {
+        // Check if user needs position update - only if they have existing liquidity
+        if (_needsPositionUpdate(msg.sender)) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1288,10 +1447,21 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     ) external isNotBlocked nonReentrant {
         if (tokenAmount < minTokenLiquidity) revert TokenAmountBelowMinimum();
 
-        // Check if user needs position update
-        if (tokenProviders[msg.sender].lastUpdateVersion < currentVersion) {
+        // Check if user needs position update - only if they have existing liquidity
+        if (_needsPositionUpdate(msg.sender)) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1328,14 +1498,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         if (msg.value < minLiquidity) revert ETHAmountBelowMinimum();
         if (tokenAmount < minTokenLiquidity) revert TokenAmountBelowMinimum();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1376,14 +1555,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenProviders[msg.sender].pendingRewards == 0
         ) revert NoLiquidityOrRewards();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1405,11 +1593,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         if (ethProviders[msg.sender].ethLPShares > 0) {
             uint256 ethAccumulated = (ethProviders[msg.sender].ethLPShares *
                 accRewardPerShare) / SCALE;
-            ethRewards =
-                ethAccumulated -
-                ethProviders[msg.sender].rewardDebt +
-                ethProviders[msg.sender].pendingRewards;
+            ethRewards = ethAccumulated - ethProviders[msg.sender].rewardDebt;
         }
+        // Always add pending rewards (even if LP shares = 0)
+        ethRewards += ethProviders[msg.sender].pendingRewards;
 
         // Calculate ETH rewards from token LP shares after position update (if any)
         uint256 tokenProviderRewards = 0;
@@ -1418,9 +1605,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                 .tokenLPShares * accTokenProviderRewardPerShare) / SCALE;
             tokenProviderRewards =
                 tokenAccumulated -
-                tokenProviders[msg.sender].rewardDebt +
-                tokenProviders[msg.sender].pendingRewards;
+                tokenProviders[msg.sender].rewardDebt;
         }
+        // Always add pending rewards (even if LP shares = 0)
+        tokenProviderRewards += tokenProviders[msg.sender].pendingRewards;
 
         uint256 totalRewards = ethRewards + tokenProviderRewards;
         if (totalRewards == 0) revert NoRewards();
@@ -1473,14 +1661,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             ethProviders[msg.sender].pendingRewards == 0
         ) revert NoETHLiquidityOrRewards();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1502,11 +1699,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         if (ethProviders[msg.sender].ethLPShares > 0) {
             uint256 ethAccumulated = (ethProviders[msg.sender].ethLPShares *
                 accRewardPerShare) / SCALE;
-            ethRewards =
-                ethAccumulated -
-                ethProviders[msg.sender].rewardDebt +
-                ethProviders[msg.sender].pendingRewards;
+            ethRewards = ethAccumulated - ethProviders[msg.sender].rewardDebt;
         }
+        // Always add pending rewards (even if LP shares = 0)
+        ethRewards += ethProviders[msg.sender].pendingRewards;
 
         if (ethRewards == 0) revert NoRewards();
 
@@ -1544,14 +1740,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenProviders[msg.sender].pendingRewards == 0
         ) revert NoTokenLiquidityOrRewards();
 
-        // Check if user needs position update for either asset type
-        bool needsUpdate = ethProviders[msg.sender].lastUpdateVersion <
-            currentVersion ||
-            tokenProviders[msg.sender].lastUpdateVersion < currentVersion;
+        // Check if user needs position update for either asset type - only if they have existing liquidity
+        bool needsUpdate = _needsPositionUpdate(msg.sender);
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            if (proof.length == 0) revert InvalidMerkleProof();
+            // Allow empty proof for single provider scenarios
+            if (
+                proof.length == 0 &&
+                !_isEmptyProofValid(
+                    msg.sender,
+                    proof,
+                    newETHPosition,
+                    newTokenPosition
+                )
+            ) {
+                revert InvalidMerkleProof();
+            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1575,9 +1780,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                 .tokenLPShares * accTokenProviderRewardPerShare) / SCALE;
             tokenProviderRewards =
                 tokenAccumulated -
-                tokenProviders[msg.sender].rewardDebt +
-                tokenProviders[msg.sender].pendingRewards;
+                tokenProviders[msg.sender].rewardDebt;
         }
+        // Always add pending rewards (even if LP shares = 0)
+        tokenProviderRewards += tokenProviders[msg.sender].pendingRewards;
 
         if (tokenProviderRewards == 0) revert NoTokenProviderRewards();
 
