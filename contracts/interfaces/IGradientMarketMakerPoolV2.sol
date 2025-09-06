@@ -12,29 +12,25 @@ interface IGradientMarketMakerPoolV2 {
     event ETHLiquidityDeposited(
         address indexed user,
         address token,
-        uint256 ethAmount,
-        uint256 lpSharesMinted
+        uint256 ethAmount
     );
 
     event TokenLiquidityDeposited(
         address indexed user,
         address token,
-        uint256 tokenAmount,
-        uint256 lpSharesMinted
+        uint256 tokenAmount
     );
 
     event ETHLiquidityWithdrawn(
         address indexed user,
         address token,
-        uint256 ethAmount,
-        uint256 lpSharesBurned
+        uint256 ethAmount
     );
 
     event TokenLiquidityWithdrawn(
         address indexed user,
         address token,
-        uint256 tokenAmount,
-        uint256 lpSharesBurned
+        uint256 tokenAmount
     );
 
     event PoolFeeDistributed(
@@ -48,9 +44,7 @@ interface IGradientMarketMakerPoolV2 {
     event PoolBalanceUpdated(
         address indexed token,
         uint256 newTotalEth,
-        uint256 newTotalTokens,
-        uint256 newTotalETHLPShares,
-        uint256 newTotalTokenLPShares
+        uint256 newTotalTokens
     );
 
     event MinLiquidityUpdated(uint256 newMinLiquidity);
@@ -213,9 +207,15 @@ interface IGradientMarketMakerPoolV2 {
     ) external;
 
     /**
-     * @notice Distributes fee distribution from orderbook to be distributed to market makers
+     * @notice Distributes ETH fees to ETH providers only
      */
     function distributePoolFee() external payable;
+
+    /**
+     * @notice Distributes token fees to token providers only
+     * @param tokenAmount Amount of tokens to distribute as fees
+     */
+    function distributeTokenFee(uint256 tokenAmount) external;
 
     /**
      * @notice Claim rewards with optional position update
@@ -226,7 +226,9 @@ interface IGradientMarketMakerPoolV2 {
     function claimRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external;
 
     /**
@@ -234,23 +236,31 @@ interface IGradientMarketMakerPoolV2 {
      * @param proof Merkle proof for position update (required if user has pending updates)
      * @param newETHPosition New ETH position (required if proof provided)
      * @param newTokenPosition New token position (required if proof provided)
+     * @param ethRewardsToAdd Off-chain calculated ETH rewards to add
+     * @param tokenRewardsToAdd Off-chain calculated token rewards to add
      */
     function claimETHRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external;
 
     /**
-     * @notice Claim only ETH rewards for token liquidity providers with optional position update
+     * @notice Claim only token rewards for token liquidity providers with optional position update
      * @param proof Merkle proof for position update (required if user has pending updates)
      * @param newETHPosition New ETH position (required if proof provided)
      * @param newTokenPosition New token position (required if proof provided)
+     * @param ethRewardsToAdd Off-chain calculated ETH rewards to add
+     * @param tokenRewardsToAdd Off-chain calculated token rewards to add
      */
     function claimTokenRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external;
 
     /**
@@ -369,8 +379,8 @@ interface IGradientMarketMakerPoolV2 {
      * @param user Address of the user
      * @return ethPosition User's ETH position
      * @return tokenPosition User's token position
-     * @return ethLPShares User's ETH LP shares
-     * @return tokenLPShares User's token LP shares
+     * @return ethSharePercent User's ETH share percentage
+     * @return tokenSharePercent User's token share percentage
      * @return pendingRewards User's pending rewards
      */
     function getUserPosition(
@@ -381,8 +391,8 @@ interface IGradientMarketMakerPoolV2 {
         returns (
             uint256 ethPosition,
             uint256 tokenPosition,
-            uint256 ethLPShares,
-            uint256 tokenLPShares,
+            uint256 ethSharePercent,
+            uint256 tokenSharePercent,
             uint256 pendingRewards
         );
 
@@ -401,17 +411,9 @@ interface IGradientMarketMakerPoolV2 {
 
     function totalTokens() external view returns (uint256);
 
-    function totalETHLPShares() external view returns (uint256);
-
-    function totalTokenLPShares() external view returns (uint256);
-
     function userETHPosition(address user) external view returns (uint256);
 
     function userTokenPosition(address user) external view returns (uint256);
-
-    function userETHLPShares(address user) external view returns (uint256);
-
-    function userTokenLPShares(address user) external view returns (uint256);
 
     // Merkle root view functions
     function merkleRoot() external view returns (bytes32);

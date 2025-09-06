@@ -40,15 +40,6 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
     ]);
 
     // 8. Configure orderbook settings for testnet
-    // Set initial fee percentage (0.5% = 50 basis points)
-    m.call(gradientOrderbook, "setFeePercentage", [50]);
-
-    // Set order size limits (lower for testnet)
-    m.call(gradientOrderbook, "setOrderSizeLimits", [
-        "1000000000000", // minOrderSize: 0.0001 ETH
-        "100000000000000000000" // maxOrderSize: 100 ETH
-    ]);
-
     // Set max order TTL (7 days for testnet)
     m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 

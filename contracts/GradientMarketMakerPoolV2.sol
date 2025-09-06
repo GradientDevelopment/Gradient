@@ -51,6 +51,7 @@ error RouterNotSet();
 error PairDoesNotExist();
 error OverflowInETHRewardCalculation();
 error OverflowInTokenProviderRewardCalculation();
+error OverflowInTokenRewardCalculation();
 error ETHAmountMismatch();
 error InsufficientTokenLiquidity();
 error InsufficientETHLiquidity();
@@ -79,14 +80,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     uint256 public totalETH;
     uint256 public totalTokens;
 
-    // Separate LP shares tracking for each asset type
-    uint256 public totalETHLPShares;
-    uint256 public totalTokenLPShares;
-
     // Separate structs for ETH and token providers
     struct ETHProvider {
         uint256 ethPosition;
-        uint256 ethLPShares;
         uint256 rewardDebt;
         uint256 pendingRewards;
         uint256 lastUpdateVersion;
@@ -94,7 +90,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
     struct TokenProvider {
         uint256 tokenPosition;
-        uint256 tokenLPShares;
         uint256 rewardDebt;
         uint256 pendingRewards;
         uint256 lastUpdateVersion;
@@ -106,11 +101,14 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
     // Reward tracking - separate ETH pools for each provider type
     uint256 public accRewardPerShare; // For ETH providers (ETH rewards)
-    uint256 public accTokenProviderRewardPerShare; // For token providers (ETH rewards)
+    uint256 public accTokenRewardPerShare; // For ETH providers (token rewards)
     uint256 public rewardBalance; // ETH rewards for ETH providers
     uint256 public tokenProviderRewardBalance; // ETH rewards for token providers
 
     uint256 public constant SCALE = 1e18;
+
+    // Token decimals for proper reward calculations
+    uint8 public tokenDecimals;
 
     // Configurable minimum liquidity requirements
     uint256 public minLiquidity = 1e15; // 0.001 ETH minimum (default)
@@ -134,32 +132,34 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     event ETHLiquidityDeposited(
         address indexed user,
         address token,
-        uint256 ethAmount,
-        uint256 lpSharesMinted
+        uint256 ethAmount
     );
 
     event TokenLiquidityDeposited(
         address indexed user,
         address token,
-        uint256 tokenAmount,
-        uint256 lpSharesMinted
+        uint256 tokenAmount
     );
 
     event ETHLiquidityWithdrawn(
         address indexed user,
         address token,
-        uint256 ethAmount,
-        uint256 lpSharesBurned
+        uint256 ethAmount
     );
 
     event TokenLiquidityWithdrawn(
         address indexed user,
         address token,
-        uint256 tokenAmount,
-        uint256 lpSharesBurned
+        uint256 tokenAmount
     );
 
     event PoolFeeDistributed(
+        address indexed from,
+        uint256 amount,
+        address token
+    );
+
+    event TokenFeeDistributed(
         address indexed from,
         uint256 amount,
         address token
@@ -170,9 +170,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     event PoolBalanceUpdated(
         address indexed token,
         uint256 newTotalEth,
-        uint256 newTotalTokens,
-        uint256 newTotalETHLPShares,
-        uint256 newTotalTokenLPShares
+        uint256 newTotalTokens
     );
 
     event MinLiquidityUpdated(uint256 newMinLiquidity);
@@ -214,6 +212,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         token = _token;
         factory = IGradientMarketMakerFactory(msg.sender);
+
+        // Initialize token decimals for proper reward calculations
+        tokenDecimals = IERC20Metadata(address(_token)).decimals();
     }
 
     /**
@@ -240,30 +241,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate LP shares using a more secure formula to prevent precision loss
-     * @param amount Amount being deposited
-     * @param totalAmount Total amount in pool
-     * @param totalShares Total shares in pool
-     * @return sharesToMint Number of shares to mint
-     */
-    function calculateLPShares(
-        uint256 amount,
-        uint256 totalAmount,
-        uint256 totalShares
-    ) public pure returns (uint256 sharesToMint) {
-        if (amount == 0) revert AmountZero();
-
-        if (totalShares == 0) {
-            return amount;
-        }
-
-        sharesToMint = (amount * totalShares) / totalAmount;
-        if (sharesToMint == 0) revert InsufficientShares();
-
-        return sharesToMint;
-    }
-
-    /**
      * @notice Updates ETH pool rewards before modifying state
      * @param ethAmount Amount of ETH to distribute as rewards to ETH providers
      */
@@ -271,9 +248,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         if (ethAmount == 0) revert AmountZero();
 
         // Distribute ETH rewards to ETH providers only
-        if (totalETHLPShares > 0) {
+        if (totalETH > 0) {
             uint256 newAccRewardPerShare = accRewardPerShare +
-                ((ethAmount * SCALE) / totalETHLPShares);
+                ((ethAmount * SCALE) / totalETH);
             if (newAccRewardPerShare < accRewardPerShare)
                 revert OverflowInETHRewardCalculation();
             accRewardPerShare = newAccRewardPerShare;
@@ -284,24 +261,61 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate withdrawal amount with proper validation
-     * @param sharesToBurn Number of shares being burned
-     * @param totalAmount Total amount in pool
-     * @param totalShares Total shares in pool
-     * @return withdrawalAmount Amount to withdraw
+     * @notice Update token rewards for token providers
+     * @param tokenAmount Amount of tokens to distribute as rewards (in token decimals)
      */
-    function _calculateWithdrawalAmount(
-        uint256 sharesToBurn,
-        uint256 totalAmount,
-        uint256 totalShares
-    ) internal pure returns (uint256 withdrawalAmount) {
-        if (sharesToBurn == 0) revert AmountZero();
-        if (totalShares == 0) revert NoLiquidity();
+    function _updateTokenRewards(uint256 tokenAmount) internal {
+        if (tokenAmount == 0) revert AmountZero();
 
-        withdrawalAmount = (sharesToBurn * totalAmount) / totalShares;
-        if (withdrawalAmount > totalAmount) revert InsufficientPoolBalance();
+        // Distribute token rewards to token providers only
+        if (totalTokens > 0) {
+            // Normalize token amount to 18 decimals for consistent calculations
+            uint256 normalizedTokenAmount = _normalizeTo18Decimals(tokenAmount);
+            uint256 normalizedTotalTokens = _normalizeTo18Decimals(totalTokens);
 
-        return withdrawalAmount;
+            uint256 newAccTokenRewardPerShare = accTokenRewardPerShare +
+                ((normalizedTokenAmount * SCALE) / normalizedTotalTokens);
+            if (newAccTokenRewardPerShare < accTokenRewardPerShare)
+                revert OverflowInTokenRewardCalculation();
+            accTokenRewardPerShare = newAccTokenRewardPerShare;
+        }
+
+        // Track token rewards
+        totalTokensRemoved += tokenAmount;
+    }
+
+    /**
+     * @notice Normalize token amount to 18 decimals for consistent calculations
+     * @param amount Amount in token decimals
+     * @return uint256 Amount normalized to 18 decimals
+     */
+    function _normalizeTo18Decimals(
+        uint256 amount
+    ) internal view returns (uint256) {
+        if (tokenDecimals == 18) {
+            return amount;
+        } else if (tokenDecimals < 18) {
+            return amount * (10 ** (18 - tokenDecimals));
+        } else {
+            return amount / (10 ** (tokenDecimals - 18));
+        }
+    }
+
+    /**
+     * @notice Denormalize from 18 decimals to token decimals
+     * @param amount Amount in 18 decimals
+     * @return uint256 Amount in token decimals
+     */
+    function _denormalizeFrom18Decimals(
+        uint256 amount
+    ) internal view returns (uint256) {
+        if (tokenDecimals == 18) {
+            return amount;
+        } else if (tokenDecimals < 18) {
+            return amount / (10 ** (18 - tokenDecimals));
+        } else {
+            return amount * (10 ** (tokenDecimals - 18));
+        }
     }
 
     /**
@@ -330,16 +344,26 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
      * @param proof Merkle proof
      * @param newETHPosition New ETH position (actual ETH amount)
      * @param newTokenPosition New token position (actual token amount)
+     * @param ethRewardsToAdd Off-chain calculated total ETH rewards
+     * @param tokenRewardsToAdd Off-chain calculated total token provider rewards
      * @return isValid Whether the proof is valid
      */
     function _verifyMerkleProof(
         address user,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) internal view returns (bool isValid) {
         bytes32 leaf = keccak256(
-            abi.encodePacked(user, newETHPosition, newTokenPosition)
+            abi.encodePacked(
+                user,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            )
         );
 
         // Special handling for single provider case
@@ -359,51 +383,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
      */
     function _updateETHProviderPosition(
         address user,
-        uint256 newETHPosition
+        uint256 newETHPosition,
+        uint256 totalRewards
     ) internal {
-        // Calculate pending rewards BEFORE updating position to preserve earned fees
-        uint256 pendingReward = 0;
-        if (ethProviders[user].ethLPShares > 0) {
-            pendingReward =
-                (ethProviders[user].ethLPShares * accRewardPerShare) /
-                SCALE -
-                ethProviders[user].rewardDebt;
-            ethProviders[user].pendingRewards += pendingReward;
-        }
-
-        // Store old LP shares before updating
-        uint256 oldUserLPShares = ethProviders[user].ethLPShares;
+        ethProviders[user].pendingRewards = totalRewards;
 
         // Update user's last update version for ETH provider
         ethProviders[user].lastUpdateVersion = currentVersion;
 
-        // Update ETH provider position and calculate corresponding LP shares
+        // Update ETH provider position
         ethProviders[user].ethPosition = newETHPosition;
-        if (totalETH > 0 && totalETHLPShares > 0) {
-            // Calculate new LP shares based on position and current pool ratio
-            uint256 newUserLPShares = (newETHPosition * totalETHLPShares) /
-                totalETH;
 
-            // Update totalETHLPShares by the difference (old - old + new = new - old)
-            totalETHLPShares =
-                totalETHLPShares -
-                oldUserLPShares +
-                newUserLPShares;
-
-            // Set user's new LP shares
-            ethProviders[user].ethLPShares = newUserLPShares;
-        } else if (totalETH > 0 && totalETHLPShares == 0) {
-            // First user getting ETH position after trade - initialize
-            ethProviders[user].ethLPShares = newETHPosition;
-            totalETHLPShares = newETHPosition;
-        } else {
-            // If pool is empty, LP shares = position
-            ethProviders[user].ethLPShares = newETHPosition;
-        }
-
-        // Update reward debt for the new LP shares to ensure accurate future reward calculations
+        // Update reward debt for the new position to ensure accurate future reward calculations
         ethProviders[user].rewardDebt =
-            (ethProviders[user].ethLPShares * accRewardPerShare) /
+            (newETHPosition * accRewardPerShare) /
             SCALE;
     }
 
@@ -414,53 +407,23 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
      */
     function _updateTokenProviderPosition(
         address user,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 totalRewards
     ) internal {
-        // Calculate pending rewards BEFORE updating position to preserve earned fees
-        uint256 pendingReward = 0;
-        if (tokenProviders[user].tokenLPShares > 0) {
-            pendingReward =
-                (tokenProviders[user].tokenLPShares *
-                    accTokenProviderRewardPerShare) /
-                SCALE -
-                tokenProviders[user].rewardDebt;
-            tokenProviders[user].pendingRewards += pendingReward;
-        }
-
-        // Store old LP shares before updating
-        uint256 oldUserLPShares = tokenProviders[user].tokenLPShares;
+        tokenProviders[user].pendingRewards = totalRewards;
 
         // Update user's last update version for token provider
         tokenProviders[user].lastUpdateVersion = currentVersion;
 
-        // Update token provider position and calculate corresponding LP shares
+        // Update token provider position
         tokenProviders[user].tokenPosition = newTokenPosition;
-        if (totalTokens > 0 && totalTokenLPShares > 0) {
-            // Calculate new LP shares based on position and current pool ratio
-            uint256 newUserLPShares = (newTokenPosition * totalTokenLPShares) /
-                totalTokens;
 
-            // Update totalTokenLPShares by the difference (old - old + new = new - old)
-            totalTokenLPShares =
-                totalTokenLPShares -
-                oldUserLPShares +
-                newUserLPShares;
-
-            // Set user's new LP shares
-            tokenProviders[user].tokenLPShares = newUserLPShares;
-        } else if (totalTokens > 0 && totalTokenLPShares == 0) {
-            // First user getting token position after trade - initialize
-            tokenProviders[user].tokenLPShares = newTokenPosition;
-            totalTokenLPShares = newTokenPosition;
-        } else {
-            // If pool is empty, LP shares = position
-            tokenProviders[user].tokenLPShares = newTokenPosition;
-        }
-
-        // Update reward debt for the new LP shares to ensure accurate future reward calculations
+        // Update reward debt for the new position to ensure a                                      ccurate future reward calculations
+        uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+            newTokenPosition
+        );
         tokenProviders[user].rewardDebt =
-            (tokenProviders[user].tokenLPShares *
-                accTokenProviderRewardPerShare) /
+            (normalizedTokenPosition * accTokenRewardPerShare) /
             SCALE;
     }
 
@@ -473,57 +436,19 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     function _updateUserPosition(
         address user,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethTotalRewards,
+        uint256 tokenTotalRewards
     ) internal {
         // Update both provider positions
-        _updateETHProviderPosition(user, newETHPosition);
-        _updateTokenProviderPosition(user, newTokenPosition);
+        _updateETHProviderPosition(user, newETHPosition, ethTotalRewards);
+        _updateTokenProviderPosition(user, newTokenPosition, tokenTotalRewards);
 
         // Emit event for position update
         emit UserPositionUpdated(
             user,
             currentVersion,
             newETHPosition,
-            newTokenPosition
-        );
-    }
-
-    /**
-     * @notice Update only ETH provider position using merkle proof
-     * @param user User address
-     * @param newETHPosition New ETH position (actual ETH amount)
-     */
-    function _updateOnlyETHProviderPosition(
-        address user,
-        uint256 newETHPosition
-    ) internal {
-        _updateETHProviderPosition(user, newETHPosition);
-
-        // Emit event for ETH-only position update
-        emit UserPositionUpdated(
-            user,
-            currentVersion,
-            newETHPosition,
-            tokenProviders[user].tokenPosition
-        );
-    }
-
-    /**
-     * @notice Update only token provider position using merkle proof
-     * @param user User address
-     * @param newTokenPosition New token position (actual token amount)
-     */
-    function _updateOnlyTokenProviderPosition(
-        address user,
-        uint256 newTokenPosition
-    ) internal {
-        _updateTokenProviderPosition(user, newTokenPosition);
-
-        // Emit event for token-only position update
-        emit UserPositionUpdated(
-            user,
-            currentVersion,
-            ethProviders[user].ethPosition,
             newTokenPosition
         );
     }
@@ -537,9 +462,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
      */
     function _needsPositionUpdate(address user) internal view returns (bool) {
         return
-            (ethProviders[user].ethLPShares > 0 &&
+            (ethProviders[user].ethPosition > 0 &&
                 ethProviders[user].lastUpdateVersion < currentVersion) ||
-            (tokenProviders[user].tokenLPShares > 0 &&
+            (tokenProviders[user].tokenPosition > 0 &&
                 tokenProviders[user].lastUpdateVersion < currentVersion) ||
             // Also check if user has pending rewards that need position update
             (ethProviders[user].pendingRewards > 0 &&
@@ -555,26 +480,36 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
      * @param proof Merkle proof array
      * @param newETHPosition New ETH position
      * @param newTokenPosition New token position
+     * @param ethRewardsToAdd Total ETH rewards
+     * @param tokenRewardsToAdd Total token provider rewards
      * @return isValid Whether the empty proof is valid for this user
      */
     function _isEmptyProofValid(
         address user,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) internal view returns (bool isValid) {
         // Empty proof is only valid if it's a single provider scenario
         if (proof.length == 0) {
             // Check if this user is the only provider
-            bool isUserOnlyProvider = (totalETHLPShares == 0 ||
-                ethProviders[user].ethLPShares == totalETHLPShares) &&
-                (totalTokenLPShares == 0 ||
-                    tokenProviders[user].tokenLPShares == totalTokenLPShares);
+            bool isUserOnlyProvider = (totalETH == 0 ||
+                ethProviders[user].ethPosition == totalETH) &&
+                (totalTokens == 0 ||
+                    tokenProviders[user].tokenPosition == totalTokens);
 
             if (isUserOnlyProvider) {
                 // For single provider, verify that the leaf equals the merkle root
                 bytes32 leaf = keccak256(
-                    abi.encodePacked(user, newETHPosition, newTokenPosition)
+                    abi.encodePacked(
+                        user,
+                        newETHPosition,
+                        newTokenPosition,
+                        ethRewardsToAdd,
+                        tokenRewardsToAdd
+                    )
                 );
                 return leaf == merkleRoot;
             }
@@ -596,23 +531,15 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         }
         if (uniswapPair == address(0)) revert PairDoesNotExist();
 
-        // Calculate pending rewards before update - only use ETH LP shares
-        if (ethProviders[user].ethLPShares > 0) {
-            uint256 pendingReward = (ethProviders[user].ethLPShares *
+        // Calculate pending rewards before update
+        if (ethProviders[user].ethPosition > 0) {
+            uint256 pendingReward = (ethProviders[user].ethPosition *
                 accRewardPerShare) /
                 SCALE -
                 ethProviders[user].rewardDebt;
             ethProviders[user].pendingRewards += pendingReward;
         }
 
-        // Calculate LP shares to mint
-        uint256 lpSharesToMint = calculateLPShares(
-            ethAmount,
-            totalETH,
-            totalETHLPShares
-        );
-
-        ethProviders[user].ethLPShares += lpSharesToMint;
         ethProviders[user].ethPosition += ethAmount;
 
         // Initialize lastUpdateVersion for first-time liquidity providers
@@ -620,13 +547,12 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             ethProviders[user].lastUpdateVersion = currentVersion;
         }
 
-        // Update reward debt using only ETH LP shares
+        // Update reward debt
         ethProviders[user].rewardDebt =
-            (ethProviders[user].ethLPShares * accRewardPerShare) /
+            (ethProviders[user].ethPosition * accRewardPerShare) /
             SCALE;
 
         totalETH += ethAmount;
-        totalETHLPShares += lpSharesToMint;
         totalEthAdded += ethAmount;
 
         // Emit to EventAggregator
@@ -634,17 +560,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             user,
             address(token),
             0, // ETH_ADD
-            ethAmount,
-            lpSharesToMint
+            ethAmount
         );
 
         // Emit local event
-        emit ETHLiquidityDeposited(
-            user,
-            address(token),
-            ethAmount,
-            lpSharesToMint
-        );
+        emit ETHLiquidityDeposited(user, address(token), ethAmount);
     }
 
     /**
@@ -662,23 +582,15 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Transfer tokens from user
         token.safeTransferFrom(msg.sender, address(this), tokenAmount);
 
-        // Calculate pending rewards before update - only use token LP shares
-        if (tokenProviders[user].tokenLPShares > 0) {
-            uint256 pendingReward = (tokenProviders[user].tokenLPShares *
-                accTokenProviderRewardPerShare) /
+        // Calculate pending rewards before update
+        if (tokenProviders[user].tokenPosition > 0) {
+            uint256 pendingReward = (tokenProviders[user].tokenPosition *
+                accTokenRewardPerShare) /
                 SCALE -
                 tokenProviders[user].rewardDebt;
             tokenProviders[user].pendingRewards += pendingReward;
         }
 
-        // Calculate LP shares to mint
-        uint256 lpSharesToMint = calculateLPShares(
-            tokenAmount,
-            totalTokens,
-            totalTokenLPShares
-        );
-
-        tokenProviders[user].tokenLPShares += lpSharesToMint;
         tokenProviders[user].tokenPosition += tokenAmount;
 
         // Initialize lastUpdateVersion for first-time liquidity providers
@@ -686,14 +598,15 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenProviders[user].lastUpdateVersion = currentVersion;
         }
 
-        // Update reward debt using only token LP shares
+        // Update reward debt
+        uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+            tokenProviders[user].tokenPosition
+        );
         tokenProviders[user].rewardDebt =
-            (tokenProviders[user].tokenLPShares *
-                accTokenProviderRewardPerShare) /
+            (normalizedTokenPosition * accTokenRewardPerShare) /
             SCALE;
 
         totalTokens += tokenAmount;
-        totalTokenLPShares += lpSharesToMint;
         totalTokensAdded += tokenAmount;
 
         // Emit to EventAggregator
@@ -701,17 +614,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             user,
             address(token),
             2, // TOKEN_ADD
-            tokenAmount,
-            lpSharesToMint
+            tokenAmount
         );
 
         // Emit local event
-        emit TokenLiquidityDeposited(
-            user,
-            address(token),
-            tokenAmount,
-            lpSharesToMint
-        );
+        emit TokenLiquidityDeposited(user, address(token), tokenAmount);
     }
 
     /**
@@ -755,7 +662,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 minTokenAmount,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
@@ -771,7 +680,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -784,12 +695,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then remove liquidity
@@ -810,7 +729,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 minEthAmount,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
@@ -826,7 +747,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -839,12 +762,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then remove ETH liquidity
@@ -864,7 +795,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 minTokenAmount,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external isNotBlocked nonReentrant {
         if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
 
@@ -880,7 +813,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -893,40 +828,24 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then remove token liquidity
         _removeTokenLiquidity(shares, minTokenAmount);
-    }
-
-    /**
-     * @notice Update user position using merkle proof
-     * @param user User address
-     * @param proof Merkle proof for position update
-     * @param newETHPosition New ETH position (actual ETH amount)
-     * @param newTokenPosition New token position (actual token amount)
-     */
-    function _updatePositionWithProof(
-        address user,
-        bytes32[] calldata proof,
-        uint256 newETHPosition,
-        uint256 newTokenPosition
-    ) internal {
-        // Verify merkle proof is valid and current
-        if (!_verifyMerkleProof(user, proof, newETHPosition, newTokenPosition))
-            revert InvalidMerkleProof();
-
-        // Additional validation: ensure proof is for current merkle root
-        if (merkleRoot == bytes32(0)) revert NoMerkleRoot();
-
-        // Update user position
-        _updateUserPosition(user, newETHPosition, newTokenPosition);
     }
 
     // =============================== REMOVAL FUNCTIONS ===============================
@@ -940,76 +859,58 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 shares,
         uint256 minEthAmount
     ) internal {
-        if (totalETHLPShares == 0) revert NoLiquidity();
+        if (totalETH == 0) revert NoLiquidity();
         if (ethProviders[msg.sender].ethPosition == 0)
             revert NoLiquidityToWithdraw();
 
-        // Calculate pending rewards before withdrawing - only use ETH LP shares
-        uint256 pendingReward = (ethProviders[msg.sender].ethLPShares *
+        // Calculate pending rewards before withdrawing
+        uint256 pendingReward = (ethProviders[msg.sender].ethPosition *
             accRewardPerShare) /
             SCALE -
             ethProviders[msg.sender].rewardDebt;
         ethProviders[msg.sender].pendingRewards += pendingReward;
 
-        // Calculate LP shares to burn based on withdrawal percentage - only use ETH LP shares
-        uint256 lpSharesToBurn = (ethProviders[msg.sender].ethLPShares *
+        // Calculate amount to withdraw based on withdrawal percentage
+        uint256 amountToWithdraw = (ethProviders[msg.sender].ethPosition *
             shares) / 10000;
-        if (lpSharesToBurn == 0) revert NoSharesToBurn();
+        if (amountToWithdraw == 0) revert NoSharesToBurn();
 
-        // Ensure we don't burn more LP shares than the user actually has (prevent underflow)
-        if (lpSharesToBurn > ethProviders[msg.sender].ethLPShares) {
-            lpSharesToBurn = ethProviders[msg.sender].ethLPShares;
+        // Ensure we don't withdraw more than the user actually has (prevent underflow)
+        if (amountToWithdraw > ethProviders[msg.sender].ethPosition) {
+            amountToWithdraw = ethProviders[msg.sender].ethPosition;
         }
-
-        // Calculate actual withdrawal amounts based on LP shares
-        uint256 actualEthWithdraw = _calculateWithdrawalAmount(
-            lpSharesToBurn,
-            totalETH,
-            totalETHLPShares
-        );
-        if (actualEthWithdraw > totalETH) revert InsufficientPoolBalance();
-
-        // Ensure we don't withdraw more than the user's actual position (prevent underflow)
-        if (actualEthWithdraw > ethProviders[msg.sender].ethPosition) {
-            actualEthWithdraw = ethProviders[msg.sender].ethPosition;
-        }
+        if (amountToWithdraw > totalETH) revert InsufficientPoolBalance();
 
         // Update balances
-        ethProviders[msg.sender].ethPosition -= actualEthWithdraw;
-        ethProviders[msg.sender].ethLPShares -= lpSharesToBurn; // Remove from ETH LP shares
+        ethProviders[msg.sender].ethPosition -= amountToWithdraw;
 
-        // Update reward debt using only ETH LP shares
+        // Update reward debt
         ethProviders[msg.sender].rewardDebt =
-            (ethProviders[msg.sender].ethLPShares * accRewardPerShare) /
+            (ethProviders[msg.sender].ethPosition * accRewardPerShare) /
             SCALE;
 
-        totalETH -= actualEthWithdraw;
-        totalETHLPShares -= lpSharesToBurn;
+        totalETH -= amountToWithdraw;
+        totalEthRemoved += amountToWithdraw;
 
         // Transfer ETH back to user
-        if (actualEthWithdraw < minEthAmount) revert InsufficientWithdrawal();
-        (bool success, ) = payable(msg.sender).call{value: actualEthWithdraw}(
+        if (amountToWithdraw < minEthAmount) revert InsufficientWithdrawal();
+        (bool success, ) = payable(msg.sender).call{value: amountToWithdraw}(
             ""
         );
         if (!success) revert ETHTransferFailed();
-
-        // Track total ETH removed by LPs
-        totalEthRemoved += actualEthWithdraw;
 
         // Emit to EventAggregator instead of local event
         getEventAggregator().emitLiquidityEvent(
             msg.sender,
             address(token),
             1, // ETH_REMOVE
-            actualEthWithdraw,
-            lpSharesToBurn
+            amountToWithdraw
         );
 
         emit ETHLiquidityWithdrawn(
             msg.sender,
             address(token),
-            actualEthWithdraw,
-            lpSharesToBurn
+            amountToWithdraw
         );
     }
 
@@ -1022,77 +923,59 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 shares,
         uint256 minTokenAmount
     ) internal {
-        if (totalTokenLPShares == 0) revert NoLiquidity();
+        if (totalTokens == 0) revert NoLiquidity();
         if (tokenProviders[msg.sender].tokenPosition == 0)
             revert NoLiquidityToWithdraw();
 
-        // Calculate pending rewards before withdrawing - only use token LP shares
-        uint256 pendingReward = (tokenProviders[msg.sender].tokenLPShares *
-            accTokenProviderRewardPerShare) /
+        // Calculate pending rewards before withdrawing
+        uint256 pendingReward = (tokenProviders[msg.sender].tokenPosition *
+            accTokenRewardPerShare) /
             SCALE -
             tokenProviders[msg.sender].rewardDebt;
         tokenProviders[msg.sender].pendingRewards += pendingReward;
 
-        // Calculate LP shares to burn based on withdrawal percentage - only use token LP shares
-        uint256 lpSharesToBurn = (tokenProviders[msg.sender].tokenLPShares *
+        // Calculate amount to withdraw based on withdrawal percentage
+        uint256 amountToWithdraw = (tokenProviders[msg.sender].tokenPosition *
             shares) / 10000;
-        if (lpSharesToBurn == 0) revert NoSharesToBurn();
+        if (amountToWithdraw == 0) revert NoSharesToBurn();
 
-        // Ensure we don't burn more LP shares than the user actually has (prevent underflow)
-        if (lpSharesToBurn > tokenProviders[msg.sender].tokenLPShares) {
-            lpSharesToBurn = tokenProviders[msg.sender].tokenLPShares;
+        // Ensure we don't withdraw more than the user actually has (prevent underflow)
+        if (amountToWithdraw > tokenProviders[msg.sender].tokenPosition) {
+            amountToWithdraw = tokenProviders[msg.sender].tokenPosition;
         }
 
-        // Calculate actual withdrawal amounts based on LP shares
-        uint256 actualTokenWithdraw = _calculateWithdrawalAmount(
-            lpSharesToBurn,
-            totalTokens,
-            totalTokenLPShares
-        );
-        if (actualTokenWithdraw > totalTokens) revert InsufficientPoolBalance();
-
-        // Ensure we don't withdraw more than the user's actual position (prevent underflow)
-        if (actualTokenWithdraw > tokenProviders[msg.sender].tokenPosition) {
-            actualTokenWithdraw = tokenProviders[msg.sender].tokenPosition;
-        }
+        if (amountToWithdraw > totalTokens) revert InsufficientPoolBalance();
 
         // Update balances
-        tokenProviders[msg.sender].tokenPosition -= actualTokenWithdraw;
-        tokenProviders[msg.sender].tokenLPShares -= lpSharesToBurn; // Remove from token LP shares
+        tokenProviders[msg.sender].tokenPosition -= amountToWithdraw;
 
-        // Update reward debt using only token LP shares
+        // Update reward debt
         tokenProviders[msg.sender].rewardDebt =
-            (tokenProviders[msg.sender].tokenLPShares *
-                accTokenProviderRewardPerShare) /
+            (tokenProviders[msg.sender].tokenPosition *
+                accTokenRewardPerShare) /
             SCALE;
 
-        totalTokens -= actualTokenWithdraw;
-        totalTokenLPShares -= lpSharesToBurn;
+        totalTokens -= amountToWithdraw;
+        totalTokensRemoved += amountToWithdraw;
 
         // Transfer tokens back to user
-        if (actualTokenWithdraw < minTokenAmount)
-            revert InsufficientWithdrawal();
-        if (actualTokenWithdraw > 0) {
-            token.safeTransfer(msg.sender, actualTokenWithdraw);
+        if (amountToWithdraw < minTokenAmount) revert InsufficientWithdrawal();
+        if (amountToWithdraw > 0) {
+            token.safeTransfer(msg.sender, amountToWithdraw);
         }
-
-        // Track total tokens removed by LPs
-        totalTokensRemoved += actualTokenWithdraw;
 
         // Emit to EventAggregator instead of local event
         getEventAggregator().emitLiquidityEvent(
             msg.sender,
             address(token),
             3, // TOKEN_REMOVE
-            actualTokenWithdraw,
-            lpSharesToBurn
+            amountToWithdraw
         );
 
         emit TokenLiquidityWithdrawn(
             msg.sender,
             address(token),
-            actualTokenWithdraw,
-            lpSharesToBurn
+            amountToWithdraw
         );
     }
 
@@ -1151,13 +1034,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenAmount
         );
 
-        emit PoolBalanceUpdated(
-            address(token),
-            totalETH,
-            totalTokens,
-            totalETHLPShares,
-            totalTokenLPShares
-        );
+        emit PoolBalanceUpdated(address(token), totalETH, totalTokens);
     }
 
     /**
@@ -1196,7 +1073,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Pool provides ETH to orderbook
         totalETH -= ethAmount;
         totalEthRemoved += ethAmount;
-        totalTokens += tokenAmount; // CRITICAL: Update totalTokens with incoming tokens from orderbook
+        totalTokens += tokenAmount;
         totalTokensAdded += tokenAmount;
 
         // Transfer ETH to orderbook
@@ -1214,38 +1091,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             tokenAmount
         );
 
-        emit PoolBalanceUpdated(
-            address(token),
-            totalETH,
-            totalTokens,
-            totalETHLPShares,
-            totalTokenLPShares
-        );
-    }
-
-    // =============================== MERKLE ROOT FUNCTIONS ===============================
-
-    /**
-     * @notice Update Merkle root for LP share updates
-     * @param version New version number
-     * @param newMerkleRoot New Merkle root
-     * @dev Only callable by owner (off-chain server)
-     */
-    function updateMerkleRoot(
-        uint256 version,
-        bytes32 newMerkleRoot
-    ) external onlyOwner {
-        if (version <= currentVersion) revert VersionAlreadyProcessed();
-        if (newMerkleRoot == bytes32(0)) revert InvalidMerkleRoot();
-
-        currentVersion = version;
-        merkleRoot = newMerkleRoot;
-        versionMerkleRoots[version] = newMerkleRoot;
-
-        // Emit to EventAggregator instead of local event
-        getEventAggregator().emitMerkleRootUpdated(version, newMerkleRoot);
-
-        emit MerkleRootUpdated(version, newMerkleRoot);
+        emit PoolBalanceUpdated(address(token), totalETH, totalTokens);
     }
 
     /**
@@ -1259,7 +1105,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 version,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external nonReentrant {
         // Check if version is newer than the last update for either provider type
         if (
@@ -1274,72 +1122,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                 msg.sender,
                 proof,
                 newETHPosition,
-                newTokenPosition
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
             )
         ) revert InvalidMerkleProof();
 
         // Update user position
-        _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
-    }
-
-    /**
-     * @notice Update only ETH provider position using merkle proof
-     * @param version Version of the merkle root
-     * @param proof Merkle proof for the user's new ETH position
-     * @param newETHPosition New ETH position (actual ETH amount)
-     */
-    function updateETHProviderPosition(
-        uint256 version,
-        bytes32[] calldata proof,
-        uint256 newETHPosition
-    ) external nonReentrant {
-        // Check if version is newer than the last update for ETH provider
-        if (version <= ethProviders[msg.sender].lastUpdateVersion)
-            revert VersionAlreadyProcessed();
-        if (version > currentVersion) revert VersionNotAvailable();
-
-        // Verify merkle proof (only ETH position)
-        if (
-            !_verifyMerkleProof(
-                msg.sender,
-                proof,
-                newETHPosition,
-                tokenProviders[msg.sender].tokenPosition
-            )
-        ) revert InvalidMerkleProof();
-
-        // Update only ETH provider position
-        _updateOnlyETHProviderPosition(msg.sender, newETHPosition);
-    }
-
-    /**
-     * @notice Update only token provider position using merkle proof
-     * @param version Version of the merkle root
-     * @param proof Merkle proof for the user's new token position
-     * @param newTokenPosition New token position (actual token amount)
-     */
-    function updateTokenProviderPosition(
-        uint256 version,
-        bytes32[] calldata proof,
-        uint256 newTokenPosition
-    ) external nonReentrant {
-        // Check if version is newer than the last update for token provider
-        if (version <= tokenProviders[msg.sender].lastUpdateVersion)
-            revert VersionAlreadyProcessed();
-        if (version > currentVersion) revert VersionNotAvailable();
-
-        // Verify merkle proof (only token position)
-        if (
-            !_verifyMerkleProof(
-                msg.sender,
-                proof,
-                ethProviders[msg.sender].ethPosition,
-                newTokenPosition
-            )
-        ) revert InvalidMerkleProof();
-
-        // Update only token provider position
-        _updateOnlyTokenProviderPosition(msg.sender, newTokenPosition);
+        _updateUserPosition(
+            msg.sender,
+            newETHPosition,
+            newTokenPosition,
+            ethRewardsToAdd,
+            tokenRewardsToAdd
+        );
     }
 
     // =============================== REWARD DISTRIBUTION FUNCTIONS ===============================
@@ -1356,30 +1152,22 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Distributes ETH fees to token providers only
+     * @notice Distributes token fees to token providers only
+     * @param tokenAmount Amount of tokens to distribute as fees
      */
-    function distributeTokenProviderFee()
-        external
-        payable
-        onlyRewardDistributor
-    {
-        if (msg.value == 0) revert NoETHSent();
+    function distributeTokenFee(
+        uint256 tokenAmount
+    ) external onlyRewardDistributor {
+        if (tokenAmount == 0) revert AmountZero();
 
-        // Distribute ETH rewards to token providers only
-        if (totalTokenLPShares > 0) {
-            uint256 newAccTokenProviderRewardPerShare = accTokenProviderRewardPerShare +
-                    ((msg.value * SCALE) / totalTokenLPShares);
-            if (
-                newAccTokenProviderRewardPerShare <
-                accTokenProviderRewardPerShare
-            ) revert OverflowInTokenProviderRewardCalculation();
-            accTokenProviderRewardPerShare = newAccTokenProviderRewardPerShare;
-        }
+        // Transfer tokens from orderbook to this contract
+        IERC20(token).safeTransferFrom(msg.sender, address(this), tokenAmount);
 
-        // Track ETH rewards for token providers
-        tokenProviderRewardBalance += msg.value;
+        // Update token rewards using the same pattern as distributePoolFee
+        totalTokensAdded += tokenAmount;
+        _updateTokenRewards(tokenAmount);
 
-        emit PoolFeeDistributed(msg.sender, msg.value, address(token));
+        emit TokenFeeDistributed(msg.sender, tokenAmount, address(token));
     }
 
     // =============================== USER FUNCTIONS ===============================
@@ -1393,7 +1181,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     function addETHLiquidityWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external payable isNotBlocked nonReentrant {
         if (msg.value < minLiquidity) revert ETHAmountBelowMinimum();
 
@@ -1407,7 +1197,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1420,12 +1212,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then add ETH liquidity
@@ -1443,7 +1243,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 tokenAmount,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external isNotBlocked nonReentrant {
         if (tokenAmount < minTokenLiquidity) revert TokenAmountBelowMinimum();
 
@@ -1457,7 +1259,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1470,12 +1274,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then add token liquidity
@@ -1493,7 +1305,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         uint256 tokenAmount,
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external payable isNotBlocked nonReentrant {
         if (msg.value < minLiquidity) revert ETHAmountBelowMinimum();
         if (tokenAmount < minTokenLiquidity) revert TokenAmountBelowMinimum();
@@ -1510,7 +1324,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1523,12 +1339,20 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Then add liquidity
@@ -1545,12 +1369,14 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     function claimRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external nonReentrant {
-        uint256 totalUserLPShares = ethProviders[msg.sender].ethLPShares +
-            tokenProviders[msg.sender].tokenLPShares;
+        uint256 totalUserPosition = ethProviders[msg.sender].ethPosition +
+            tokenProviders[msg.sender].tokenPosition;
         if (
-            totalUserLPShares == 0 &&
+            totalUserPosition == 0 &&
             ethProviders[msg.sender].pendingRewards == 0 &&
             tokenProviders[msg.sender].pendingRewards == 0
         ) revert NoLiquidityOrRewards();
@@ -1567,7 +1393,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1580,49 +1408,62 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
         // Calculate ETH rewards after position update (if any)
         uint256 ethRewards = 0;
-        if (ethProviders[msg.sender].ethLPShares > 0) {
-            uint256 ethAccumulated = (ethProviders[msg.sender].ethLPShares *
+        if (ethProviders[msg.sender].ethPosition > 0) {
+            uint256 ethAccumulated = (ethProviders[msg.sender].ethPosition *
                 accRewardPerShare) / SCALE;
             ethRewards = ethAccumulated - ethProviders[msg.sender].rewardDebt;
         }
-        // Always add pending rewards (even if LP shares = 0)
+        // Always add pending rewards
         ethRewards += ethProviders[msg.sender].pendingRewards;
 
-        // Calculate ETH rewards from token LP shares after position update (if any)
+        // Calculate token rewards from token positions after position update (if any)
         uint256 tokenProviderRewards = 0;
-        if (tokenProviders[msg.sender].tokenLPShares > 0) {
-            uint256 tokenAccumulated = (tokenProviders[msg.sender]
-                .tokenLPShares * accTokenProviderRewardPerShare) / SCALE;
+        if (tokenProviders[msg.sender].tokenPosition > 0) {
+            uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+                tokenProviders[msg.sender].tokenPosition
+            );
+            uint256 tokenAccumulated = (normalizedTokenPosition *
+                accTokenRewardPerShare) / SCALE;
             tokenProviderRewards =
                 tokenAccumulated -
                 tokenProviders[msg.sender].rewardDebt;
         }
-        // Always add pending rewards (even if LP shares = 0)
+        // Always add pending rewards
         tokenProviderRewards += tokenProviders[msg.sender].pendingRewards;
 
         uint256 totalRewards = ethRewards + tokenProviderRewards;
         if (totalRewards == 0) revert NoRewards();
 
         // Update reward debt for both asset types
-        if (ethProviders[msg.sender].ethLPShares > 0) {
+        if (ethProviders[msg.sender].ethPosition > 0) {
             ethProviders[msg.sender].rewardDebt =
-                (ethProviders[msg.sender].ethLPShares * accRewardPerShare) /
+                (ethProviders[msg.sender].ethPosition * accRewardPerShare) /
                 SCALE;
         }
-        if (tokenProviders[msg.sender].tokenLPShares > 0) {
+        if (tokenProviders[msg.sender].tokenPosition > 0) {
+            uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+                tokenProviders[msg.sender].tokenPosition
+            );
             tokenProviders[msg.sender].rewardDebt =
-                (tokenProviders[msg.sender].tokenLPShares *
-                    accTokenProviderRewardPerShare) /
+                (normalizedTokenPosition * accTokenRewardPerShare) /
                 SCALE;
         }
 
@@ -1630,17 +1471,40 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         ethProviders[msg.sender].pendingRewards = 0;
         tokenProviders[msg.sender].pendingRewards = 0;
 
-        // Transfer total ETH rewards
-        totalEthRemoved += totalRewards;
-        (bool success, ) = payable(msg.sender).call{value: totalRewards}("");
-        if (!success) revert ETHWithdrawalFailed();
+        // Transfer ETH rewards
+        if (ethRewards > 0) {
+            totalEthRemoved += ethRewards;
+            (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
+            if (!success) revert ETHWithdrawalFailed();
+        }
 
-        // Emit to EventAggregator instead of local event
-        getEventAggregator().emitRewardsClaimed(
-            msg.sender,
-            address(token),
-            totalRewards
-        );
+        // Transfer token rewards
+        if (tokenProviderRewards > 0) {
+            // Denormalize rewards from 18 decimals back to token decimals
+            uint256 denormalizedRewards = _denormalizeFrom18Decimals(
+                tokenProviderRewards
+            );
+            token.safeTransfer(msg.sender, denormalizedRewards);
+        }
+
+        // Emit events to EventAggregator
+        if (ethRewards > 0) {
+            getEventAggregator().emitETHRewardsClaimed(
+                msg.sender,
+                address(token),
+                ethRewards
+            );
+        }
+        if (tokenProviderRewards > 0) {
+            uint256 denormalizedRewards = _denormalizeFrom18Decimals(
+                tokenProviderRewards
+            );
+            getEventAggregator().emitTokenRewardsClaimed(
+                msg.sender,
+                address(token),
+                denormalizedRewards
+            );
+        }
 
         emit FeeClaimed(msg.sender, totalRewards, address(token));
     }
@@ -1654,12 +1518,12 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     function claimETHRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external nonReentrant {
-        if (
-            ethProviders[msg.sender].ethLPShares == 0 &&
-            ethProviders[msg.sender].pendingRewards == 0
-        ) revert NoETHLiquidityOrRewards();
+        if (ethProviders[msg.sender].pendingRewards == 0)
+            revert NoETHLiquidityOrRewards();
 
         // Check if user needs position update for either asset type - only if they have existing liquidity
         bool needsUpdate = _needsPositionUpdate(msg.sender);
@@ -1673,7 +1537,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1686,30 +1552,38 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
-        // Calculate ETH rewards from ETH LP shares only
+        // Calculate ETH rewards from ETH positions only
         uint256 ethRewards = 0;
-        if (ethProviders[msg.sender].ethLPShares > 0) {
-            uint256 ethAccumulated = (ethProviders[msg.sender].ethLPShares *
+        if (ethProviders[msg.sender].ethPosition > 0) {
+            uint256 ethAccumulated = (ethProviders[msg.sender].ethPosition *
                 accRewardPerShare) / SCALE;
             ethRewards = ethAccumulated - ethProviders[msg.sender].rewardDebt;
         }
-        // Always add pending rewards (even if LP shares = 0)
+        // Always add pending rewards
         ethRewards += ethProviders[msg.sender].pendingRewards;
 
         if (ethRewards == 0) revert NoRewards();
 
         // Update reward debt
-        if (ethProviders[msg.sender].ethLPShares > 0) {
+        if (ethProviders[msg.sender].ethPosition > 0) {
             ethProviders[msg.sender].rewardDebt =
-                (ethProviders[msg.sender].ethLPShares * accRewardPerShare) /
+                (ethProviders[msg.sender].ethPosition * accRewardPerShare) /
                 SCALE;
         }
 
@@ -1720,6 +1594,13 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         totalEthRemoved += ethRewards;
         (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
         if (!success) revert ETHWithdrawalFailed();
+
+        // Emit to EventAggregator instead of local event
+        getEventAggregator().emitETHRewardsClaimed(
+            msg.sender,
+            address(token),
+            ethRewards
+        );
 
         emit FeeClaimed(msg.sender, ethRewards, address(token));
     }
@@ -1733,12 +1614,12 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     function claimTokenRewardsWithProof(
         bytes32[] calldata proof,
         uint256 newETHPosition,
-        uint256 newTokenPosition
+        uint256 newTokenPosition,
+        uint256 ethRewardsToAdd,
+        uint256 tokenRewardsToAdd
     ) external nonReentrant {
-        if (
-            tokenProviders[msg.sender].tokenLPShares == 0 &&
-            tokenProviders[msg.sender].pendingRewards == 0
-        ) revert NoTokenLiquidityOrRewards();
+        if (tokenProviders[msg.sender].pendingRewards == 0)
+            revert NoTokenLiquidityOrRewards();
 
         // Check if user needs position update for either asset type - only if they have existing liquidity
         bool needsUpdate = _needsPositionUpdate(msg.sender);
@@ -1752,7 +1633,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) {
                 revert InvalidMerkleProof();
@@ -1765,47 +1648,68 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                     msg.sender,
                     proof,
                     newETHPosition,
-                    newTokenPosition
+                    newTokenPosition,
+                    ethRewardsToAdd,
+                    tokenRewardsToAdd
                 )
             ) revert InvalidMerkleProof();
 
             // Update user position first
-            _updateUserPosition(msg.sender, newETHPosition, newTokenPosition);
+            _updateUserPosition(
+                msg.sender,
+                newETHPosition,
+                newTokenPosition,
+                ethRewardsToAdd,
+                tokenRewardsToAdd
+            );
         }
 
-        // Calculate ETH rewards from token LP shares only
+        // Calculate token rewards from token positions only
         uint256 tokenProviderRewards = 0;
-        if (tokenProviders[msg.sender].tokenLPShares > 0) {
-            uint256 tokenAccumulated = (tokenProviders[msg.sender]
-                .tokenLPShares * accTokenProviderRewardPerShare) / SCALE;
+        if (tokenProviders[msg.sender].tokenPosition > 0) {
+            // Normalize token position to 18 decimals for consistent calculation
+            uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+                tokenProviders[msg.sender].tokenPosition
+            );
+            uint256 tokenAccumulated = (normalizedTokenPosition *
+                accTokenRewardPerShare) / SCALE;
             tokenProviderRewards =
                 tokenAccumulated -
                 tokenProviders[msg.sender].rewardDebt;
         }
-        // Always add pending rewards (even if LP shares = 0)
+        // Always add pending rewards
         tokenProviderRewards += tokenProviders[msg.sender].pendingRewards;
 
         if (tokenProviderRewards == 0) revert NoTokenProviderRewards();
 
         // Update reward debt
-        if (tokenProviders[msg.sender].tokenLPShares > 0) {
+        if (tokenProviders[msg.sender].tokenPosition > 0) {
+            uint256 normalizedTokenPosition = _normalizeTo18Decimals(
+                tokenProviders[msg.sender].tokenPosition
+            );
             tokenProviders[msg.sender].rewardDebt =
-                (tokenProviders[msg.sender].tokenLPShares *
-                    accTokenProviderRewardPerShare) /
+                (normalizedTokenPosition * accTokenRewardPerShare) /
                 SCALE;
         }
 
         // Clear pending rewards
         tokenProviders[msg.sender].pendingRewards = 0;
 
-        // Transfer ETH rewards (not tokens!)
-        totalEthRemoved += tokenProviderRewards;
-        (bool success, ) = payable(msg.sender).call{
-            value: tokenProviderRewards
-        }("");
-        if (!success) revert ETHWithdrawalFailed();
+        // Transfer token rewards
+        uint256 denormalizedRewards = _denormalizeFrom18Decimals(
+            tokenProviderRewards
+        );
+        totalTokensRemoved += denormalizedRewards;
+        token.safeTransfer(msg.sender, denormalizedRewards);
 
-        emit FeeClaimed(msg.sender, tokenProviderRewards, address(token));
+        // Emit to EventAggregator instead of local event
+        getEventAggregator().emitTokenRewardsClaimed(
+            msg.sender,
+            address(token),
+            denormalizedRewards
+        );
+
+        emit FeeClaimed(msg.sender, denormalizedRewards, address(token));
     }
 
     // =============================== VIEW FUNCTIONS ===============================
@@ -1848,61 +1752,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             : (reserve0, reserve1);
     }
 
-    /**
-     * @notice Get user's total position in the pool
-     * @param user Address of the user
-     * @return ethPosition User's ETH position
-     * @return tokenPosition User's token position
-     * @return ethLPShares User's ETH LP shares
-     * @return tokenLPShares User's token LP shares
-     * @return pendingRewards User's pending rewards
-     */
-    function getUserPosition(
-        address user
-    )
-        external
-        view
-        returns (
-            uint256 ethPosition,
-            uint256 tokenPosition,
-            uint256 ethLPShares,
-            uint256 tokenLPShares,
-            uint256 pendingRewards
-        )
-    {
-        ethPosition = ethProviders[user].ethPosition;
-        tokenPosition = tokenProviders[user].tokenPosition;
-        ethLPShares = ethProviders[user].ethLPShares;
-        tokenLPShares = tokenProviders[user].tokenLPShares;
-
-        // Calculate pending rewards for each asset type separately
-        uint256 ethPendingRewards = 0;
-        if (ethProviders[user].ethLPShares > 0) {
-            ethPendingRewards =
-                (ethProviders[user].ethLPShares * accRewardPerShare) /
-                SCALE -
-                ethProviders[user].rewardDebt +
-                ethProviders[user].pendingRewards;
-        } else {
-            ethPendingRewards = ethProviders[user].pendingRewards;
-        }
-
-        uint256 tokenPendingRewards = 0;
-        if (tokenProviders[user].tokenLPShares > 0) {
-            tokenPendingRewards =
-                (tokenProviders[user].tokenLPShares *
-                    accTokenProviderRewardPerShare) /
-                SCALE -
-                tokenProviders[user].rewardDebt +
-                tokenProviders[user].pendingRewards;
-        } else {
-            tokenPendingRewards = tokenProviders[user].pendingRewards;
-        }
-
-        // Total pending rewards (ETH + ETH from token provider pool)
-        pendingRewards = ethPendingRewards + tokenPendingRewards;
-    }
-
     // =============================== OWNER FUNCTIONS ===============================
 
     /**
@@ -1925,40 +1774,5 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         if (_minTokenLiquidity == 0) revert InvalidMinTokenLiquidity();
         minTokenLiquidity = _minTokenLiquidity;
         emit MinTokenLiquidityUpdated(_minTokenLiquidity);
-    }
-
-    /**
-     * @notice Emergency function to withdraw specific amount of ETH from the contract
-     * @param recipient Address to receive the ETH
-     * @param amount Amount of ETH to withdraw
-     */
-    function emergencyWithdrawETH(
-        address payable recipient,
-        uint256 amount
-    ) external onlyOwner {
-        if (recipient == address(0)) revert InvalidRecipient();
-        if (amount == 0) revert AmountZero();
-        if (address(this).balance < amount) revert InsufficientETHBalance();
-
-        (bool success, ) = recipient.call{value: amount}("");
-        if (!success) revert ETHWithdrawalFailed();
-    }
-
-    /**
-     * @notice Emergency function to withdraw specific amount of tokens from the contract
-     * @param recipient Address to receive the tokens
-     * @param amount Amount of tokens to withdraw
-     */
-    function emergencyWithdrawToken(
-        address recipient,
-        uint256 amount
-    ) external onlyOwner {
-        if (recipient == address(0)) revert InvalidRecipient();
-        if (amount == 0) revert AmountZero();
-
-        uint256 balance = token.balanceOf(address(this));
-        if (balance < amount) revert InsufficientTokenBalance();
-
-        token.safeTransfer(recipient, amount);
     }
 }

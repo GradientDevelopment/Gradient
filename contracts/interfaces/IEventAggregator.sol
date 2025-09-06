@@ -20,11 +20,16 @@ interface IEventAggregator {
         address user,
         address token,
         uint8 eventType,
-        uint256 amount,
-        uint256 lpShares
+        uint256 amount
     ) external;
 
-    function emitRewardsClaimed(
+    function emitETHRewardsClaimed(
+        address user,
+        address token,
+        uint256 amount
+    ) external;
+
+    function emitTokenRewardsClaimed(
         address user,
         address token,
         uint256 amount

@@ -17,8 +17,9 @@ contract EventAggregator {
     uint8 public constant ETH_REMOVE = 1;
     uint8 public constant TOKEN_ADD = 2;
     uint8 public constant TOKEN_REMOVE = 3;
-    uint8 public constant REWARDS_CLAIMED = 4;
-    uint8 public constant TRADE_EXECUTED = 5;
+    uint8 public constant ETH_REWARDS_CLAIMED = 4;
+    uint8 public constant TOKEN_REWARDS_CLAIMED = 5;
+    uint8 public constant TRADE_EXECUTED = 6;
 
     // Main liquidity event - emitted for all pool operations
     event LiquidityEvent(
@@ -27,7 +28,6 @@ contract EventAggregator {
         address indexed token,
         uint8 eventType,
         uint256 amount,
-        uint256 lpShares,
         uint256 timestamp
     );
 
@@ -84,16 +84,14 @@ contract EventAggregator {
      * @param token Token address
      * @param eventType Type of liquidity event
      * @param amount Amount involved
-     * @param lpShares LP shares minted/burned
      */
     function emitLiquidityEvent(
         address user,
         address token,
         uint8 eventType,
-        uint256 amount,
-        uint256 lpShares
+        uint256 amount
     ) external onlyPool {
-        require(eventType <= TOKEN_REMOVE, "Invalid event type");
+        require(eventType <= TOKEN_REWARDS_CLAIMED, "Invalid event type");
         require(user != address(0), "Invalid user address");
         require(token != address(0), "Invalid token address");
 
@@ -103,18 +101,17 @@ contract EventAggregator {
             token,
             eventType,
             amount,
-            lpShares,
             block.timestamp
         );
     }
 
     /**
-     * @notice Emit rewards claimed event
+     * @notice Emit ETH rewards claimed event
      * @param user User address
      * @param token Token address
-     * @param amount Amount of rewards claimed
+     * @param amount Amount of ETH rewards claimed
      */
-    function emitRewardsClaimed(
+    function emitETHRewardsClaimed(
         address user,
         address token,
         uint256 amount
@@ -126,9 +123,32 @@ contract EventAggregator {
             msg.sender, // pool address
             user,
             token,
-            REWARDS_CLAIMED,
+            ETH_REWARDS_CLAIMED,
             amount,
-            0, // no LP shares for rewards
+            block.timestamp
+        );
+    }
+
+    /**
+     * @notice Emit token provider rewards claimed event
+     * @param user User address
+     * @param token Token address
+     * @param amount Amount of token provider rewards claimed
+     */
+    function emitTokenRewardsClaimed(
+        address user,
+        address token,
+        uint256 amount
+    ) external onlyPool {
+        require(user != address(0), "Invalid user address");
+        require(token != address(0), "Invalid token address");
+
+        emit LiquidityEvent(
+            msg.sender, // pool address
+            user,
+            token,
+            TOKEN_REWARDS_CLAIMED,
+            amount,
             block.timestamp
         );
     }
@@ -210,7 +230,8 @@ contract EventAggregator {
         if (eventType == ETH_REMOVE) return "ETH_REMOVE";
         if (eventType == TOKEN_ADD) return "TOKEN_ADD";
         if (eventType == TOKEN_REMOVE) return "TOKEN_REMOVE";
-        if (eventType == REWARDS_CLAIMED) return "REWARDS_CLAIMED";
+        if (eventType == ETH_REWARDS_CLAIMED) return "ETH_REWARDS_CLAIMED";
+        if (eventType == TOKEN_REWARDS_CLAIMED) return "TOKEN_REWARDS_CLAIMED";
         if (eventType == TRADE_EXECUTED) return "TRADE_EXECUTED";
         return "UNKNOWN";
     }

@@ -73,14 +73,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Counter for generating unique order IDs
     uint256 private _orderIdCounter;
 
-    /// @notice Fee percentage charged on trades (in basis points, 1 = 0.01%)
-    uint256 public feePercentage;
+    /// @notice Fee percentage charged on ETH fees (in basis points, 1 = 0.01%)
+    uint256 public ethFeePercentage;
+
+    /// @notice Fee percentage charged on token fees (in basis points, 1 = 0.01%)
+    uint256 public tokenFeePercentage;
 
     /// @notice Maximum fee percentage that can be set (in basis points)
     uint256 public constant MAX_FEE_PERCENTAGE = 500; // 5%
 
-    /// @notice Total fees collected
-    uint256 public totalFeesCollected;
+    /// @notice Total ETH fees collected
+    uint256 public totalEthFeesCollected;
+
+    /// @notice Total token fees collected per token
+    mapping(address => uint256) public totalTokenFeesCollected;
 
     /// @notice Mapping from order ID to Order struct
     mapping(uint256 => Order) public orders;
@@ -154,14 +160,27 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 executionPrice
     );
 
-    /// @notice Emitted when fee percentage is updated
-    event FeePercentageUpdated(
+    /// @notice Emitted when ETH fee percentage is updated
+    event EthFeePercentageUpdated(
         uint256 oldFeePercentage,
         uint256 newFeePercentage
     );
 
-    /// @notice Emitted when fees are withdrawn
-    event FeesWithdrawn(address indexed recipient, uint256 amount);
+    /// @notice Emitted when token fee percentage is updated
+    event TokenFeePercentageUpdated(
+        uint256 oldFeePercentage,
+        uint256 newFeePercentage
+    );
+
+    /// @notice Emitted when ETH fees are withdrawn
+    event EthFeesWithdrawn(address indexed recipient, uint256 amount);
+
+    /// @notice Emitted when token fees are withdrawn
+    event TokenFeesWithdrawn(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
 
     event OrderSizeLimitsUpdated(uint256 minSize, uint256 maxSize);
     event MaxTTLUpdated(uint256 newMaxTTL);
@@ -202,16 +221,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Emitted when dust tolerance is updated
     event DustToleranceUpdated(uint256 oldTolerance, uint256 newTolerance);
-
-    /// @notice Emitted when ETH is withdrawn in emergency
-    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
-
-    /// @notice Emitted when tokens are withdrawn in emergency
-    event EmergencyWithdrawToken(
-        address indexed token,
-        address indexed recipient,
-        uint256 amount
-    );
 
     // Modifiers
     modifier onlyAuthorizedFulfiller() {
@@ -268,7 +277,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
-        feePercentage = 50;
+        ethFeePercentage = 50; // 0.5% for ETH fees
+        tokenFeePercentage = 50; // 0.5% for token fees
 
         minOrderSize = 1e6;
         maxOrderSize = 1000 ether;
@@ -279,12 +289,25 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     fallback() external payable {}
 
-    /// @notice Internal function to calculate and collect fees
+    /// @notice Internal function to calculate and collect ETH fees
     /// @param amount Amount in ETH to calculate fee from
     /// @return uint256 Fee amount collected
-    function _collectFee(uint256 amount) internal returns (uint256) {
-        uint256 feeAmount = (amount * feePercentage) / DIVISOR;
-        totalFeesCollected += feeAmount;
+    function _collectEthFee(uint256 amount) internal returns (uint256) {
+        uint256 feeAmount = (amount * ethFeePercentage) / DIVISOR;
+        totalEthFeesCollected += feeAmount;
+        return feeAmount;
+    }
+
+    /// @notice Internal function to calculate and collect token fees
+    /// @param amount Amount in tokens to calculate fee from
+    /// @param token Token address
+    /// @return uint256 Fee amount collected
+    function _collectTokenFee(
+        uint256 amount,
+        address token
+    ) internal returns (uint256) {
+        uint256 feeAmount = (amount * tokenFeePercentage) / DIVISOR;
+        totalTokenFeesCollected[token] += feeAmount;
         return feeAmount;
     }
 
@@ -668,23 +691,23 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18; // Use sell price for limit orders
 
-        // Calculate and collect fees from both buyer and seller parties
-        uint256 buyerFee = _collectFee(paymentAmount);
-        uint256 sellerFee = _collectFee(paymentAmount);
+        // Calculate fees from receiving amounts
+        uint256 buyerFee = _collectEthFee(paymentAmount); // ETH fee from buyer's payment
+        uint256 sellerFee = _collectTokenFee(tokenAmount, sellOrder.token); // Token fee from seller's tokens
 
-        uint256 sellerPayment = paymentAmount - sellerFee;
-
+        // Transfer ETH to seller (buyer pays ETH fee)
+        uint256 sellerPayment = paymentAmount - buyerFee;
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
+        // Transfer tokens to buyer (seller pays token fee)
         {
-            uint256 tokenFee = (buyerFee * 1e18) / sellOrder.price;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
                 tokenAmount,
                 sellOrder.token
             );
             uint256 actualTokenFee = denormalizeFrom18Decimals(
-                tokenFee,
+                sellerFee,
                 sellOrder.token
             );
             IERC20(sellOrder.token).safeTransfer(
@@ -803,24 +826,23 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 tokenAmount = actualFillAmount;
         uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
 
-        // Calculate and collect fees from both buyer and seller parties
-        uint256 buyerFee = _collectFee(paymentAmount);
-        uint256 sellerFee = _collectFee(paymentAmount);
+        // Calculate fees from receiving amounts
+        uint256 buyerFee = _collectEthFee(paymentAmount); // ETH fee from buyer's payment
+        uint256 sellerFee = _collectTokenFee(tokenAmount, sellOrder.token); // Token fee from seller's tokens
 
-        // Calculate final amounts after fees
-        uint256 sellerPayment = paymentAmount - sellerFee;
+        // Transfer ETH to seller (buyer pays ETH fee)
+        uint256 sellerPayment = paymentAmount - buyerFee;
 
         (bool success, ) = sellOrder.owner.call{value: sellerPayment}("");
         require(success, "ETH transfer to seller failed");
 
         {
-            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
                 tokenAmount,
                 sellOrder.token
             );
             uint256 actualTokenFee = denormalizeFrom18Decimals(
-                tokenFee,
+                sellerFee,
                 sellOrder.token
             );
             IERC20(sellOrder.token).safeTransfer(
@@ -940,45 +962,40 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         if (order.orderType == OrderType.Buy) {
             // Buy order from order to get tokens from market maker pool
-            uint256 buyerFee = _collectFee(paymentAmount);
-            uint256 netPaymentAmount = paymentAmount - buyerFee;
-
-            // Calculate token fee and deduct from received tokens
-            uint256 tokenFee = (buyerFee * 1e18) / executionPrice;
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
                 actualFillAmount,
-                order.token
-            );
-            uint256 actualTokenFee = denormalizeFrom18Decimals(
-                tokenFee,
                 order.token
             );
 
             // For buy orders: orderbook sends ETH to market maker, receives tokens
             IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
-                value: netPaymentAmount
-            }(netPaymentAmount, actualTokenAmount - actualTokenFee, merkleRoot);
+                value: paymentAmount
+            }(paymentAmount, actualTokenAmount, merkleRoot);
+
+            // Calculate fee from received tokens and deduct from user
+            uint256 tokenFee = _collectTokenFee(actualTokenAmount, order.token);
+            uint256 netTokenAmount = actualTokenAmount - tokenFee;
 
             // Distribute market maker fee from already collected fees
-            uint256 feeForPool = (buyerFee * mmFeeDistributionPercentage) /
+            uint256 feeForPool = (tokenFee * mmFeeDistributionPercentage) /
                 DIVISOR;
-            totalFeesCollected -= feeForPool;
+            totalTokenFeesCollected[order.token] -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
-                    value: feeForPool
-                }();
+                // Approve tokens to market maker pool for fee distribution
+                IERC20(order.token).approve(marketMakerPool, feeForPool);
+                // Distribute token fee to market maker pool
+                IGradientMarketMakerPoolV2(marketMakerPool).distributeTokenFee(
+                    feeForPool
+                );
                 emit FeeDistributedToPool(
                     marketMakerPool,
                     order.token,
                     feeForPool,
-                    buyerFee
+                    tokenFee
                 );
             }
 
-            IERC20(order.token).safeTransfer(
-                order.owner,
-                actualTokenAmount - actualTokenFee
-            );
+            IERC20(order.token).safeTransfer(order.owner, netTokenAmount);
         } else {
             // Denormalize the amount for token approval
             uint256 actualTokenAmount = denormalizeFrom18Decimals(
@@ -986,23 +1003,24 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 order.token
             );
 
-            // Approve tokens to market maker pool
+            // For sell orders: orderbook sends full tokens to market maker, receives ETH
             IERC20(order.token).approve(marketMakerPool, actualTokenAmount);
 
             // Execute sell order - Orderbook sends tokens, receives ETH
             IGradientMarketMakerPoolV2(marketMakerPool).executeSellOrder(
                 paymentAmount,
                 actualTokenAmount,
-                merkleRoot // Pass the current merkle root
+                merkleRoot
             );
 
-            // Collect fee from ETH received
-            uint256 fee = _collectFee(paymentAmount);
-            uint256 finalPayment = paymentAmount - fee;
+            // Calculate fee from received ETH and deduct from user
+            uint256 ethFee = _collectEthFee(paymentAmount);
+            uint256 netEthAmount = paymentAmount - ethFee;
 
             // Distribute fees to market maker pool
-            uint256 feeForPool = (fee * mmFeeDistributionPercentage) / DIVISOR;
-            totalFeesCollected -= feeForPool;
+            uint256 feeForPool = (ethFee * mmFeeDistributionPercentage) /
+                DIVISOR;
+            totalEthFeesCollected -= feeForPool;
             if (feeForPool > 0) {
                 IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
                     value: feeForPool
@@ -1011,12 +1029,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                     marketMakerPool,
                     order.token,
                     feeForPool,
-                    fee
+                    ethFee
                 );
             }
 
             // Transfer ETH to seller (minus fee)
-            (bool success, ) = order.owner.call{value: finalPayment}("");
+            (bool success, ) = order.owner.call{value: netEthAmount}("");
             require(success, "ETH transfer to seller failed");
         }
 
@@ -1094,21 +1112,21 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 ethToSend = (actualFillAmount * order.price) / 1e18;
             }
 
-            // Calculate and collect buyer fee BEFORE sending ETH to AMM
-            uint256 buyerFee = _collectFee(ethToSend);
-            uint256 netEthToSend = ethToSend - buyerFee;
-
-            // Execute the buy trade directly through FallbackExecutor with net ETH amount
+            // Execute the buy trade directly through FallbackExecutor with full ETH amount
             uint256 tokensReceived = IFallbackExecutor(fallbackExecutor)
-                .executeTrade{value: netEthToSend}(
+                .executeTrade{value: ethToSend}(
                 order.token,
-                netEthToSend,
+                ethToSend,
                 minAmountOut,
                 true // isBuy = true
             );
 
-            // Transfer all received tokens to the buyer (fee already collected in ETH)
-            IERC20(order.token).safeTransfer(order.owner, tokensReceived);
+            // Calculate fee from received tokens and deduct from user (buy order receives tokens)
+            uint256 tokenFee = _collectTokenFee(tokensReceived, order.token);
+            uint256 netTokenAmount = tokensReceived - tokenFee;
+
+            // Transfer tokens to the buyer (minus fee)
+            IERC20(order.token).safeTransfer(order.owner, netTokenAmount);
 
             // Calculate effective execution price for buy orders
             if (tokensReceived > 0) {
@@ -1123,10 +1141,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 order.token
             );
 
-            // Approve tokens to FallbackExecutor
+            // Approve tokens to FallbackExecutor (approve the full amount)
             IERC20(order.token).approve(fallbackExecutor, actualTokenAmount);
 
-            // Execute the sell trade
+            // Execute the sell trade with full amount
             uint256 ethReceived = IFallbackExecutor(fallbackExecutor)
                 .executeTrade(
                     order.token,
@@ -1135,11 +1153,10 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                     false // isBuy = false
                 );
 
-            uint256 ammFee = _collectFee(ethReceived);
-
-            // Transfer received ETH to order owner (minus fee)
-            uint256 ethForUser = ethReceived - ammFee;
-            (bool success, ) = order.owner.call{value: ethForUser}("");
+            // Calculate fee from received ETH and deduct from user (sell order receives ETH)
+            uint256 ethFee = _collectEthFee(ethReceived);
+            uint256 netEthAmount = ethReceived - ethFee;
+            (bool success, ) = order.owner.call{value: netEthAmount}("");
             require(success, "ETH transfer to seller failed");
 
             // Calculate effective execution price for sell orders
@@ -1440,17 +1457,32 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     // ========================== Admin Functions ==========================
 
-    /// @notice Sets the fee percentage for trades
+    /// @notice Sets the ETH fee percentage
     /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
     /// @dev Only callable by contract owner
-    function setFeePercentage(uint256 newFeePercentage) external onlyOwner {
+    function setEthFeePercentage(uint256 newFeePercentage) external onlyOwner {
         require(
             newFeePercentage <= MAX_FEE_PERCENTAGE,
             "Fee percentage too high"
         );
-        uint256 oldFeePercentage = feePercentage;
-        feePercentage = newFeePercentage;
-        emit FeePercentageUpdated(oldFeePercentage, newFeePercentage);
+        uint256 oldFeePercentage = ethFeePercentage;
+        ethFeePercentage = newFeePercentage;
+        emit EthFeePercentageUpdated(oldFeePercentage, newFeePercentage);
+    }
+
+    /// @notice Sets the token fee percentage
+    /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
+    /// @dev Only callable by contract owner
+    function setTokenFeePercentage(
+        uint256 newFeePercentage
+    ) external onlyOwner {
+        require(
+            newFeePercentage <= MAX_FEE_PERCENTAGE,
+            "Fee percentage too high"
+        );
+        uint256 oldFeePercentage = tokenFeePercentage;
+        tokenFeePercentage = newFeePercentage;
+        emit TokenFeePercentageUpdated(oldFeePercentage, newFeePercentage);
     }
 
     /**
@@ -1468,19 +1500,38 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         gradientRegistry = _gradientRegistry;
     }
 
-    /// @notice Withdraws collected fees to the specified address
-    /// @param recipient Address to receive the fees
+    /// @notice Withdraws collected ETH fees to the specified address
+    /// @param recipient Address to receive the ETH fees
     /// @dev Only callable by contract owner
-    function withdrawFees(address payable recipient) external onlyOwner {
+    function withdrawEthFees(address payable recipient) external onlyOwner {
         require(recipient != address(0), "Invalid recipient");
-        uint256 amount = totalFeesCollected;
-        require(amount > 0, "No fees to withdraw");
+        uint256 amount = totalEthFeesCollected;
+        require(amount > 0, "No ETH fees to withdraw");
 
-        totalFeesCollected = 0;
+        totalEthFeesCollected = 0;
         (bool success, ) = recipient.call{value: amount}("");
-        require(success, "Fee withdrawal failed");
+        require(success, "ETH fee withdrawal failed");
 
-        emit FeesWithdrawn(recipient, amount);
+        emit EthFeesWithdrawn(recipient, amount);
+    }
+
+    /// @notice Withdraws collected token fees to the specified address
+    /// @param token Address of the token to withdraw fees for
+    /// @param recipient Address to receive the token fees
+    /// @dev Only callable by contract owner
+    function withdrawTokenFees(
+        address token,
+        address recipient
+    ) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(recipient != address(0), "Invalid recipient");
+        uint256 amount = totalTokenFeesCollected[token];
+        require(amount > 0, "No token fees to withdraw");
+
+        totalTokenFeesCollected[token] = 0;
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit TokenFeesWithdrawn(token, recipient, amount);
     }
 
     /// @notice Sets the minimum and maximum order size limits
@@ -1652,70 +1703,5 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 oldDeviation = maxPriceDeviation;
         maxPriceDeviation = newDeviation;
         emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);
-    }
-
-    /// @notice Emergency function to withdraw specific amount of ETH from the contract
-    /// @param recipient Address to receive the ETH
-    /// @param amount Amount of ETH to withdraw
-    /// @dev Only callable by contract owner in emergency situations
-    function emergencyWithdrawETHAmount(
-        address payable recipient,
-        uint256 amount
-    ) external onlyOwner {
-        require(recipient != address(0), "Invalid recipient");
-        require(amount > 0, "Amount must be greater than 0");
-        require(address(this).balance >= amount, "Insufficient ETH balance");
-
-        (bool success, ) = recipient.call{value: amount}("");
-        require(success, "ETH withdrawal failed");
-
-        emit EmergencyWithdrawETH(recipient, amount);
-    }
-
-    /// @notice Emergency function to withdraw specific amount of tokens from the contract
-    /// @param token Address of the token to withdraw
-    /// @param recipient Address to receive the tokens
-    /// @param amount Amount of tokens to withdraw
-    /// @dev Only callable by contract owner in emergency situations
-    function emergencyWithdrawTokenAmount(
-        address token,
-        address recipient,
-        uint256 amount
-    ) external onlyOwner {
-        require(token != address(0), "Invalid token address");
-        require(recipient != address(0), "Invalid recipient");
-        require(amount > 0, "Amount must be greater than 0");
-
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        require(balance >= amount, "Insufficient token balance");
-
-        IERC20(token).safeTransfer(recipient, amount);
-
-        emit EmergencyWithdrawToken(token, recipient, amount);
-    }
-
-    /// @notice Emergency function to withdraw multiple tokens at once
-    /// @param tokens Array of token addresses to withdraw
-    /// @param recipient Address to receive all tokens
-    /// @dev Only callable by contract owner in emergency situations
-    /// @dev More gas efficient than calling emergencyWithdrawToken multiple times
-    function emergencyWithdrawMultipleTokens(
-        address[] calldata tokens,
-        address recipient
-    ) external onlyOwner {
-        require(recipient != address(0), "Invalid recipient");
-        require(tokens.length > 0, "No tokens specified");
-        require(tokens.length <= 20, "Too many tokens to withdraw at once");
-
-        for (uint256 i = 0; i < tokens.length; i++) {
-            address token = tokens[i];
-            require(token != address(0), "Invalid token address");
-
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(token).safeTransfer(recipient, balance);
-                emit EmergencyWithdrawToken(token, recipient, balance);
-            }
-        }
     }
 }
