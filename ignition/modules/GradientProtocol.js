@@ -12,25 +12,36 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // 2. Deploy GradientMarketMakerFactory (depends on registry)
   const gradientMarketMakerFactory = m.contract(
     "GradientMarketMakerFactory",
-    [gradientRegistry],
+    [
+      gradientRegistry,
+      "0x0000000000000000000000000000000000000000" // Placeholder for EventAggregator
+    ],
     {}
   );
 
-  // 3. Deploy FallbackExecutor (depends on registry)
+  // 3. Deploy EventAggregator (depends on factory)
+  const eventAggregator = m.contract("EventAggregator", [
+    gradientMarketMakerFactory
+  ], {});
+
+  // 4. Update factory to use the actual EventAggregator address
+  m.call(gradientMarketMakerFactory, "setEventAggregator", [eventAggregator]);
+
+  // 5. Deploy FallbackExecutor (depends on registry)
   const fallbackExecutor = m.contract(
     "FallbackExecutor",
     [gradientRegistry],
     {}
   );
 
-  // 4. Deploy GradientOrderbook (depends on registry)
+  // 6. Deploy GradientOrderbook (depends on registry)
   const gradientOrderbook = m.contract(
     "GradientOrderbook",
     [gradientRegistry],
     {}
   );
 
-  // 5. Configure the registry with all contract addresses
+  // 7. Configure the registry with all contract addresses
   m.call(gradientRegistry, "setMainContracts", [
     gradientMarketMakerFactory, // marketMakerPool (now factory)
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
@@ -39,49 +50,45 @@ module.exports = buildModule("GradientProtocol", (m) => {
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router (mainnet)
   ]);
 
-  // 6. Set up initial configurations
-  // Note: setContractAuthorization was removed - roles are now managed through AccessControl
-
-  // 7. Configure orderbook settings
-  // Set initial fee percentage (0.5% = 50 basis points)
-  m.call(gradientOrderbook, "setFeePercentage", [50]);
-
-  // Set order size limits
-  m.call(gradientOrderbook, "setOrderSizeLimits", [
-    "10000000000000", // minOrderSize: 0.001 ETH
-    "1000000000000000000000", // maxOrderSize: 1000 ETH
-  ]);
-
-  // Set MM fee distribution percentage (70%)
-  m.call(gradientOrderbook, "updateMMFeeDistributionPercentage", [7000]);
-
-  // 8. Configure market maker factory
-  // Note: Individual pools are created dynamically when liquidity is provided
-  // Initial pools can be created here if needed
+  // 8. Configure orderbook settings for mainnet
+  // Note: Most settings are already set in constructor:
+  // - ethFeePercentage = 50 (0.5%)
+  // - tokenFeePercentage = 50 (0.5%)
+  // - minOrderSize = 1e6 (0.000001 ETH)
+  // - maxOrderSize = 1000 ether
+  // - maxOrderTtl = 30 days
+  // - mmFeeDistributionPercentage = 7000 (70%)
+  
+  // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
+  m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
   // 9. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
     deployer, // deployer address
-    true, // authorized
+    true // authorized
   ]);
 
   // 10. Set orderbook as reward distributor (so it can distribute fees to MM pools)
   m.call(gradientRegistry, "setRewardDistributor", [
-    gradientOrderbook, // orderbook address
+    gradientOrderbook // orderbook address
   ]);
 
-  // 11. Configure fallback executor
-  // Add Uniswap V2 as a DEX (example addresses for mainnet)
+  // 11. Configure fallback executor for mainnet
+  // Add Uniswap V2 as a DEX (mainnet addresses)
   m.call(fallbackExecutor, "addDEX", [
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Router address
-    1, // Priority (1 = highest)
+    1 // Priority (1 = highest)
   ]);
+
+  // 12. Create initial pool for GREY token (optional - can be done later)
+  // m.call(gradientMarketMakerFactory, "createPool", [GREY_TOKEN_ADDRESS]);
 
   return {
     gradientRegistry,
     gradientMarketMakerFactory,
+    eventAggregator,
     fallbackExecutor,
-    gradientOrderbook,
+    gradientOrderbook
   };
 });

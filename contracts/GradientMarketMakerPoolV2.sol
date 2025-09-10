@@ -29,7 +29,6 @@ error ETHTransferToOrderbookFailed();
 error VersionAlreadyProcessed();
 error VersionNotAvailable();
 error InvalidMerkleProof();
-error NoMerkleRoot();
 error NoMerkleRootForUpdates();
 error InvalidSharesPercentage();
 error NoLiquidity();
@@ -40,8 +39,6 @@ error NoRewards();
 error NoETHLiquidityOrRewards();
 error NoTokenLiquidityOrRewards();
 error NoTokenProviderRewards();
-error InvalidMerkleRoot();
-error VersionMustBeGreater();
 error InvalidRecipient();
 error InsufficientETHBalance();
 error InsufficientTokenBalance();
@@ -418,7 +415,7 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Update token provider position
         tokenProviders[user].tokenPosition = newTokenPosition;
 
-        // Update reward debt for the new position to ensure a                                      ccurate future reward calculations
+        // Update reward debt for the new position to ensure accurate future reward calculations
         uint256 normalizedTokenPosition = _normalizeTo18Decimals(
             newTokenPosition
         );
@@ -471,50 +468,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
                 ethProviders[user].lastUpdateVersion < currentVersion) ||
             (tokenProviders[user].pendingRewards > 0 &&
                 tokenProviders[user].lastUpdateVersion < currentVersion);
-    }
-
-    /**
-     * @notice Check if an empty proof is valid for a user
-     * @dev Empty proofs are valid for single providers where the leaf equals the merkle root
-     * @param user User address
-     * @param proof Merkle proof array
-     * @param newETHPosition New ETH position
-     * @param newTokenPosition New token position
-     * @param ethRewardsToAdd Total ETH rewards
-     * @param tokenRewardsToAdd Total token provider rewards
-     * @return isValid Whether the empty proof is valid for this user
-     */
-    function _isEmptyProofValid(
-        address user,
-        bytes32[] calldata proof,
-        uint256 newETHPosition,
-        uint256 newTokenPosition,
-        uint256 ethRewardsToAdd,
-        uint256 tokenRewardsToAdd
-    ) internal view returns (bool isValid) {
-        // Empty proof is only valid if it's a single provider scenario
-        if (proof.length == 0) {
-            // Check if this user is the only provider
-            bool isUserOnlyProvider = (totalETH == 0 ||
-                ethProviders[user].ethPosition == totalETH) &&
-                (totalTokens == 0 ||
-                    tokenProviders[user].tokenPosition == totalTokens);
-
-            if (isUserOnlyProvider) {
-                // For single provider, verify that the leaf equals the merkle root
-                bytes32 leaf = keccak256(
-                    abi.encodePacked(
-                        user,
-                        newETHPosition,
-                        newTokenPosition,
-                        ethRewardsToAdd,
-                        tokenRewardsToAdd
-                    )
-                );
-                return leaf == merkleRoot;
-            }
-        }
-        return false;
     }
 
     // =============================== PUBLIC FUNCTIONS ===============================
@@ -673,20 +626,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -740,20 +679,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -806,20 +731,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1190,20 +1101,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Check if user needs position update - only if they have existing liquidity
         if (_needsPositionUpdate(msg.sender)) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1252,20 +1149,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         // Check if user needs position update - only if they have existing liquidity
         if (_needsPositionUpdate(msg.sender)) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1317,20 +1200,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1386,20 +1255,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1530,20 +1385,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1626,20 +1467,6 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         if (needsUpdate) {
             // Proof is required - validate parameters
-            // Allow empty proof for single provider scenarios
-            if (
-                proof.length == 0 &&
-                !_isEmptyProofValid(
-                    msg.sender,
-                    proof,
-                    newETHPosition,
-                    newTokenPosition,
-                    ethRewardsToAdd,
-                    tokenRewardsToAdd
-                )
-            ) {
-                revert InvalidMerkleProof();
-            }
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
 
             // Verify merkle proof
@@ -1775,4 +1602,64 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         minTokenLiquidity = _minTokenLiquidity;
         emit MinTokenLiquidityUpdated(_minTokenLiquidity);
     }
+
+    // =============================== EMERGENCY FUNCTIONS ===============================
+
+    /**
+     * @notice Emergency function to withdraw ETH from the contract
+     * @param recipient Address to receive the ETH
+     * @param amount Amount of ETH to withdraw (0 = withdraw all)
+     * @dev Only callable by contract owner in emergency situations
+     */
+    function emergencyWithdrawETH(
+        address payable recipient,
+        uint256 amount
+    ) external onlyOwner {
+        if (recipient == address(0)) revert InvalidRecipient();
+        if (address(this).balance == 0) revert InsufficientETHBalance();
+
+        uint256 withdrawAmount = amount == 0 ? address(this).balance : amount;
+        if (withdrawAmount > address(this).balance)
+            revert InsufficientETHBalance();
+
+        (bool success, ) = recipient.call{value: withdrawAmount}("");
+        if (!success) revert ETHWithdrawalFailed();
+
+        emit EmergencyWithdrawETH(recipient, withdrawAmount);
+    }
+
+    /**
+     * @notice Emergency function to withdraw any ERC20 token from the contract
+     * @param tokenAddress Address of the token to withdraw
+     * @param recipient Address to receive the tokens
+     * @param amount Amount of tokens to withdraw (0 = withdraw all)
+     * @dev Only callable by contract owner in emergency situations
+     */
+    function emergencyWithdrawToken(
+        address tokenAddress,
+        address recipient,
+        uint256 amount
+    ) external onlyOwner {
+        if (tokenAddress == address(0)) revert InvalidTokenAddress();
+        if (recipient == address(0)) revert InvalidRecipient();
+
+        IERC20 tokenContract = IERC20(tokenAddress);
+        uint256 balance = tokenContract.balanceOf(address(this));
+        if (balance == 0) revert InsufficientTokenBalance();
+
+        uint256 withdrawAmount = amount == 0 ? balance : amount;
+        if (withdrawAmount > balance) revert InsufficientTokenBalance();
+
+        tokenContract.safeTransfer(recipient, withdrawAmount);
+
+        emit EmergencyWithdrawToken(tokenAddress, recipient, withdrawAmount);
+    }
+
+    // Events for emergency withdrawals
+    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
+    event EmergencyWithdrawToken(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
 }

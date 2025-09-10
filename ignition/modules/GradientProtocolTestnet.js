@@ -40,11 +40,16 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
     ]);
 
     // 8. Configure orderbook settings for testnet
-    // Set max order TTL (7 days for testnet)
+    // Note: Most settings are already set in constructor:
+    // - ethFeePercentage = 50 (0.5%)
+    // - tokenFeePercentage = 50 (0.5%)
+    // - minOrderSize = 1e6 (0.000001 ETH)
+    // - maxOrderSize = 1000 ether
+    // - maxOrderTtl = 30 days
+    // - mmFeeDistributionPercentage = 7000 (70%)
+    
+    // Override maxOrderTtl to 7 days for testnet (shorter than default 30 days)
     m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
-
-    // Set MM fee distribution percentage (70%)
-    m.call(gradientOrderbook, "updateMMFeeDistributionPercentage", [7000]);
 
     // 9. Authorize deployer as fulfiller in registry
     m.call(gradientRegistry, "authorizeFulfiller", [
