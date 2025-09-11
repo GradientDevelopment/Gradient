@@ -1,7 +1,7 @@
 {
-  "GradientProtocol#GradientRegistry": "0xF4ede55D6618a7C337c5e86F19cd183DAe11872b",
-  "GradientProtocol#FallbackExecutor": "0x746a9f12a32fDBE217Ae9d096fdcE56629D61221",
-  "GradientProtocol#GradientMarketMakerFactory": "0xad6D930552C779CF5640aB46D6B50Da989CCE521",
-  "GradientProtocol#GradientOrderbook": "0x3De437FE379131D66A4803703b3fD8531C890DbC",
-  "GradientProtocol#EventAggregator": "0x48Cf960006e6cE314aa42B05E079c60B20A693FA"
+  "GradientProtocol#GradientRegistry": "0xd2cC9718e98a9d9C66dBcc92F5D06fC1678A3979",
+  "GradientProtocol#FallbackExecutor": "0x699c3110377D5E5798192583FFB819eE40c6D1b2",
+  "GradientProtocol#GradientMarketMakerFactory": "0x1F9fd00e0A3C8935ff0322339ecA5B80719d901f",
+  "GradientProtocol#GradientOrderbook": "0xB2DCcA5683b13468c413fD0A5D5C06D3e77812dE",
+  "GradientProtocol#EventAggregator": "0x0a31f971c2d480eb13b578755757CA98EB17dAC2"
 }

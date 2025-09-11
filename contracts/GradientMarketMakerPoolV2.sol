@@ -108,8 +108,8 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
     uint8 public tokenDecimals;
 
     // Configurable minimum liquidity requirements
-    uint256 public minLiquidity = 1e15; // 0.001 ETH minimum (default)
-    uint256 public minTokenLiquidity = 1e15; // 0.001 tokens minimum (default)
+    uint256 public minLiquidity;
+    uint256 public minTokenLiquidity;
 
     // Track totals for this specific token pool
     uint256 public totalEthAdded; // Total ETH added to this pool
@@ -212,6 +212,9 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         // Initialize token decimals for proper reward calculations
         tokenDecimals = IERC20Metadata(address(_token)).decimals();
+
+        minLiquidity = 1e15; // 0.001 ETH minimum (default)
+        minTokenLiquidity = 2 * (10 ** tokenDecimals); // Set minimum token liquidity to 2 tokens
     }
 
     /**
@@ -537,7 +540,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
 
         // Calculate pending rewards before update
         if (tokenProviders[user].tokenPosition > 0) {
-            uint256 pendingReward = (tokenProviders[user].tokenPosition *
+            uint256 normalizedPosition = _normalizeTo18Decimals(
+                tokenProviders[user].tokenPosition
+            );
+            uint256 pendingReward = (normalizedPosition *
                 accTokenRewardPerShare) /
                 SCALE -
                 tokenProviders[user].rewardDebt;
@@ -839,8 +845,10 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
             revert NoLiquidityToWithdraw();
 
         // Calculate pending rewards before withdrawing
-        uint256 pendingReward = (tokenProviders[msg.sender].tokenPosition *
-            accTokenRewardPerShare) /
+        uint256 normalizedPosition = _normalizeTo18Decimals(
+            tokenProviders[msg.sender].tokenPosition
+        );
+        uint256 pendingReward = (normalizedPosition * accTokenRewardPerShare) /
             SCALE -
             tokenProviders[msg.sender].rewardDebt;
         tokenProviders[msg.sender].pendingRewards += pendingReward;
@@ -861,9 +869,11 @@ contract GradientMarketMakerPoolV2 is Ownable, ReentrancyGuard {
         tokenProviders[msg.sender].tokenPosition -= amountToWithdraw;
 
         // Update reward debt
+        uint256 normalizedPositionForDebt = _normalizeTo18Decimals(
+            tokenProviders[msg.sender].tokenPosition
+        );
         tokenProviders[msg.sender].rewardDebt =
-            (tokenProviders[msg.sender].tokenPosition *
-                accTokenRewardPerShare) /
+            (normalizedPositionForDebt * accTokenRewardPerShare) /
             SCALE;
 
         totalTokens -= amountToWithdraw;
