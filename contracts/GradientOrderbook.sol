@@ -6,7 +6,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
-import {IGradientMarketMakerPoolV2} from "./interfaces/IGradientMarketMakerPoolV2.sol";
+import {IGradientMarketMakerPoolV3} from "./interfaces/IGradientMarketMakerPoolV3.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -968,7 +968,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
 
             // For buy orders: orderbook sends ETH to market maker, receives tokens
-            IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
+            IGradientMarketMakerPoolV3(marketMakerPool).executeBuyOrder{
                 value: paymentAmount
             }(paymentAmount, actualTokenAmount, merkleRoot);
 
@@ -984,7 +984,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 // Approve tokens to market maker pool for fee distribution
                 IERC20(order.token).approve(marketMakerPool, feeForPool);
                 // Distribute token fee to market maker pool
-                IGradientMarketMakerPoolV2(marketMakerPool).distributeTokenFee(
+                IGradientMarketMakerPoolV3(marketMakerPool).distributeTokenFee(
                     feeForPool
                 );
                 emit FeeDistributedToPool(
@@ -1007,7 +1007,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             IERC20(order.token).approve(marketMakerPool, actualTokenAmount);
 
             // Execute sell order - Orderbook sends tokens, receives ETH
-            IGradientMarketMakerPoolV2(marketMakerPool).executeSellOrder(
+            IGradientMarketMakerPoolV3(marketMakerPool).executeSellOrder(
                 paymentAmount,
                 actualTokenAmount,
                 merkleRoot
@@ -1022,7 +1022,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 DIVISOR;
             totalEthFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
+                IGradientMarketMakerPoolV3(marketMakerPool).distributePoolFee{
                     value: feeForPool
                 }();
                 emit FeeDistributedToPool(

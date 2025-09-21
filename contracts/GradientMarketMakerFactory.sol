@@ -6,9 +6,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
-import {GradientMarketMakerPoolV2} from "./GradientMarketMakerPoolV2.sol";
+import {GradientMarketMakerPoolV3} from "./GradientMarketMakerPoolV3.sol";
 import {IEventAggregator} from "./interfaces/IEventAggregator.sol";
-import {IGradientMarketMakerPoolV2} from "./interfaces/IGradientMarketMakerPoolV2.sol";
+import {IGradientMarketMakerPoolV3} from "./interfaces/IGradientMarketMakerPoolV3.sol";
 
 // Custom errors to save gas and reduce contract size
 error InvalidRegistry();
@@ -95,7 +95,7 @@ contract GradientMarketMakerFactory is Ownable {
         address token
     ) internal view returns (bytes memory bytecode) {
         bytecode = abi.encodePacked(
-            type(GradientMarketMakerPoolV2).creationCode,
+            type(GradientMarketMakerPoolV3).creationCode,
             abi.encode(IERC20(token), owner())
         );
     }
@@ -152,12 +152,16 @@ contract GradientMarketMakerFactory is Ownable {
      * @param token Address of the token
      * @param initialEthAmount Amount of ETH to add as initial liquidity
      * @param initialTokenAmount Amount of tokens to add as initial liquidity
+     * @param minPrice Minimum price for liquidity range
+     * @param maxPrice Maximum price for liquidity range
      * @return pool Address of the created pool
      */
     function createPoolWithLiquidity(
         address token,
         uint256 initialEthAmount,
-        uint256 initialTokenAmount
+        uint256 initialTokenAmount,
+        uint256 minPrice,
+        uint256 maxPrice
     ) external payable returns (address pool) {
         if (token == address(0)) revert InvalidTokenAddress();
         if (getPool[token] != address(0)) revert PoolAlreadyExists();
@@ -179,9 +183,9 @@ contract GradientMarketMakerFactory is Ownable {
 
         // Add initial liquidity for the specified user
         if (initialEthAmount > 0) {
-            IGradientMarketMakerPoolV2(pool).addETHLiquidityForUser{
+            IGradientMarketMakerPoolV3(pool).addETHLiquidityForUser{
                 value: initialEthAmount
-            }(msg.sender);
+            }(msg.sender, minPrice, maxPrice);
         }
 
         if (initialTokenAmount > 0) {
@@ -194,9 +198,11 @@ contract GradientMarketMakerFactory is Ownable {
             // Approve pool to spend tokens
             IERC20(token).approve(pool, initialTokenAmount);
             // Add token liquidity for the specified user
-            IGradientMarketMakerPoolV2(pool).addTokenLiquidityForUser(
+            IGradientMarketMakerPoolV3(pool).addTokenLiquidityForUser(
                 msg.sender,
-                initialTokenAmount
+                initialTokenAmount,
+                minPrice,
+                maxPrice
             );
         }
 

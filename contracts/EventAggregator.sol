@@ -28,6 +28,8 @@ contract EventAggregator {
         address indexed token,
         uint8 eventType,
         uint256 amount,
+        uint256 minPrice,
+        uint256 maxPrice,
         uint256 timestamp
     );
 
@@ -89,7 +91,9 @@ contract EventAggregator {
         address user,
         address token,
         uint8 eventType,
-        uint256 amount
+        uint256 amount,
+        uint256 minPrice,
+        uint256 maxPrice
     ) external onlyPool {
         require(eventType <= TOKEN_REWARDS_CLAIMED, "Invalid event type");
         require(user != address(0), "Invalid user address");
@@ -101,6 +105,8 @@ contract EventAggregator {
             token,
             eventType,
             amount,
+            minPrice,
+            maxPrice,
             block.timestamp
         );
     }
@@ -125,6 +131,8 @@ contract EventAggregator {
             token,
             ETH_REWARDS_CLAIMED,
             amount,
+            0, // minPrice - rewards don't have price ranges
+            0, // maxPrice - rewards don't have price ranges
             block.timestamp
         );
     }
@@ -149,6 +157,8 @@ contract EventAggregator {
             token,
             TOKEN_REWARDS_CLAIMED,
             amount,
+            0, // minPrice - rewards don't have price ranges
+            0, // maxPrice - rewards don't have price ranges
             block.timestamp
         );
     }
