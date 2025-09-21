@@ -20,9 +20,7 @@ interface IEventAggregator {
         address user,
         address token,
         uint8 eventType,
-        uint256 amount,
-        uint256 minPrice,
-        uint256 maxPrice
+        uint256 amount
     ) external;
 
     function emitETHRewardsClaimed(

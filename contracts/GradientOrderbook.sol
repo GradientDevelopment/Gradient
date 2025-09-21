@@ -6,7 +6,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
-import {IGradientMarketMakerPoolV3} from "./interfaces/IGradientMarketMakerPoolV3.sol";
+import {IGradientMarketMakerPoolV2} from "./interfaces/IGradientMarketMakerPoolV2.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -968,7 +968,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
 
             // For buy orders: orderbook sends ETH to market maker, receives tokens
-            IGradientMarketMakerPoolV3(marketMakerPool).executeBuyOrder{
+            IGradientMarketMakerPoolV2(marketMakerPool).executeBuyOrder{
                 value: paymentAmount
             }(paymentAmount, actualTokenAmount, merkleRoot);
 
@@ -984,7 +984,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 // Approve tokens to market maker pool for fee distribution
                 IERC20(order.token).approve(marketMakerPool, feeForPool);
                 // Distribute token fee to market maker pool
-                IGradientMarketMakerPoolV3(marketMakerPool).distributeTokenFee(
+                IGradientMarketMakerPoolV2(marketMakerPool).distributeTokenFee(
                     feeForPool
                 );
                 emit FeeDistributedToPool(
@@ -1007,7 +1007,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             IERC20(order.token).approve(marketMakerPool, actualTokenAmount);
 
             // Execute sell order - Orderbook sends tokens, receives ETH
-            IGradientMarketMakerPoolV3(marketMakerPool).executeSellOrder(
+            IGradientMarketMakerPoolV2(marketMakerPool).executeSellOrder(
                 paymentAmount,
                 actualTokenAmount,
                 merkleRoot
@@ -1022,7 +1022,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 DIVISOR;
             totalEthFeesCollected -= feeForPool;
             if (feeForPool > 0) {
-                IGradientMarketMakerPoolV3(marketMakerPool).distributePoolFee{
+                IGradientMarketMakerPoolV2(marketMakerPool).distributePoolFee{
                     value: feeForPool
                 }();
                 emit FeeDistributedToPool(
@@ -1704,92 +1704,4 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         maxPriceDeviation = newDeviation;
         emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);
     }
-
-    // =============================== EMERGENCY FUNCTIONS ===============================
-
-    /**
-     * @notice Emergency function to withdraw ETH from the contract
-     * @param recipient Address to receive the ETH
-     * @param amount Amount of ETH to withdraw (0 = withdraw all)
-     * @dev Only callable by contract owner in emergency situations
-     */
-    function emergencyWithdrawETH(
-        address payable recipient,
-        uint256 amount
-    ) external onlyOwner {
-        require(recipient != address(0), "Invalid recipient");
-        require(address(this).balance > 0, "No ETH to withdraw");
-
-        uint256 withdrawAmount = amount == 0 ? address(this).balance : amount;
-        require(
-            withdrawAmount <= address(this).balance,
-            "Insufficient ETH balance"
-        );
-
-        (bool success, ) = recipient.call{value: withdrawAmount}("");
-        require(success, "ETH withdrawal failed");
-
-        emit EmergencyWithdrawETH(recipient, withdrawAmount);
-    }
-
-    /**
-     * @notice Emergency function to withdraw ERC20 tokens from the contract
-     * @param token Address of the token to withdraw
-     * @param recipient Address to receive the tokens
-     * @param amount Amount of tokens to withdraw (0 = withdraw all)
-     * @dev Only callable by contract owner in emergency situations
-     */
-    function emergencyWithdrawToken(
-        address token,
-        address recipient,
-        uint256 amount
-    ) external onlyOwner {
-        require(token != address(0), "Invalid token address");
-        require(recipient != address(0), "Invalid recipient");
-
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        require(balance > 0, "No tokens to withdraw");
-
-        uint256 withdrawAmount = amount == 0 ? balance : amount;
-        require(withdrawAmount <= balance, "Insufficient token balance");
-
-        IERC20(token).safeTransfer(recipient, withdrawAmount);
-
-        emit EmergencyWithdrawToken(token, recipient, withdrawAmount);
-    }
-
-    /**
-     * @notice Emergency function to withdraw multiple tokens at once
-     * @param tokens Array of token addresses to withdraw
-     * @param recipient Address to receive all tokens
-     * @dev Only callable by contract owner in emergency situations
-     * @dev More gas efficient than calling emergencyWithdrawToken multiple times
-     */
-    function emergencyWithdrawMultipleTokens(
-        address[] calldata tokens,
-        address recipient
-    ) external onlyOwner {
-        require(recipient != address(0), "Invalid recipient");
-        require(tokens.length > 0, "No tokens specified");
-        require(tokens.length <= 20, "Too many tokens to withdraw at once");
-
-        for (uint256 i = 0; i < tokens.length; i++) {
-            address token = tokens[i];
-            require(token != address(0), "Invalid token address");
-
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(token).safeTransfer(recipient, balance);
-                emit EmergencyWithdrawToken(token, recipient, balance);
-            }
-        }
-    }
-
-    // Events for emergency withdrawals
-    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
-    event EmergencyWithdrawToken(
-        address indexed token,
-        address indexed recipient,
-        uint256 amount
-    );
 }
