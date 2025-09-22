@@ -363,7 +363,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
             merkleRoot = newMerkleRoot;
             versionMerkleRoots[currentVersion] = newMerkleRoot;
 
-            // Emit to EventAggregator (best-effort)
             try
                 getEventAggregator().emitMerkleRootUpdated(
                     currentVersion,
@@ -552,7 +551,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         totalETH += ethAmount;
         totalEthAdded += ethAmount;
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitLiquidityEvent(
                 user,
@@ -621,7 +619,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         totalTokens += actualReceived;
         totalTokensAdded += actualReceived;
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitLiquidityEvent(
                 user,
@@ -875,7 +872,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         );
         if (!success) revert ETHTransferFailed();
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitLiquidityEvent(
                 msg.sender,
@@ -950,7 +946,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
             token.safeTransfer(msg.sender, amountToWithdraw);
         }
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitLiquidityEvent(
                 msg.sender,
@@ -1018,7 +1013,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         // Update merkle root if provided
         _updateMerkleRootAfterTrade(newMerkleRoot);
 
-        // Emit trade event to EventAggregator (best-effort)
         try
             getEventAggregator().emitTradeExecuted(
                 msg.sender, // orderbook address
@@ -1087,7 +1081,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         // Update merkle root if provided
         _updateMerkleRootAfterTrade(newMerkleRoot);
 
-        // Emit trade event to EventAggregator (best-effort)
         try
             getEventAggregator().emitTradeExecuted(
                 msg.sender, // orderbook address
@@ -1554,7 +1547,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
         if (!success) revert ETHWithdrawalFailed();
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitETHRewardsClaimed(
                 msg.sender,
@@ -1650,7 +1642,6 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         totalTokensRemoved += denormalizedRewards;
         token.safeTransfer(msg.sender, denormalizedRewards);
 
-        // Emit to EventAggregator (best-effort)
         try
             getEventAggregator().emitTokenRewardsClaimed(
                 msg.sender,
