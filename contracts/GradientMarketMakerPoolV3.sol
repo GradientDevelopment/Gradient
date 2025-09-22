@@ -165,6 +165,11 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
 
     event MinLiquidityUpdated(uint256 newMinLiquidity, bool isETH);
 
+    event PriceRangePercentageUpdated(
+        uint256 newMinPriceRangePercentage,
+        uint256 newMaxPriceRangePercentage
+    );
+
     event EmergencyWithdraw(
         address indexed token,
         address indexed recipient,
@@ -244,9 +249,9 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     uint256 public currentVersion;
     mapping(uint256 => bytes32) public versionMerkleRoots;
 
-    // Price range constants
-    uint256 public constant MIN_PRICE_RANGE_PERCENTAGE = 100; // 1% minimum range
-    uint256 public constant MAX_PRICE_RANGE_PERCENTAGE = 10000; // 100% maximum range
+    // Price range variables (configurable by owner)
+    uint256 public minPriceRangePercentage = 100; // 1% minimum range
+    uint256 public maxPriceRangePercentage = 100000; // 1000% maximum range
 
     // Position limits
 
@@ -336,17 +341,17 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     function _validatePriceRange(
         uint256 minPrice,
         uint256 maxPrice
-    ) internal pure {
+    ) internal view {
         if (minPrice == 0 || maxPrice == 0) revert InvalidPriceRange();
         if (minPrice >= maxPrice) revert InvalidPriceOrder();
 
         // Check if range is too narrow (less than 1%)
         uint256 rangePercentage = ((maxPrice - minPrice) * 10000) / minPrice;
-        if (rangePercentage < MIN_PRICE_RANGE_PERCENTAGE)
+        if (rangePercentage < minPriceRangePercentage)
             revert InvalidPriceRange();
 
-        // Check if range is too wide (more than 100%)
-        if (rangePercentage > MAX_PRICE_RANGE_PERCENTAGE)
+        // Check if range is too wide (more than maximum percentage)
+        if (rangePercentage > maxPriceRangePercentage)
             revert InvalidPriceRange();
     }
 
@@ -1361,7 +1366,12 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
      * @notice Distribute pool fee as ETH rewards to liquidity providers
      * @dev Only callable by reward distributor
      */
-    function distributePoolFee() external payable onlyRewardDistributor {
+    function distributePoolFee()
+        external
+        payable
+        onlyRewardDistributor
+        nonReentrant
+    {
         if (msg.value == 0) revert NoETHSent();
         totalEthAdded += msg.value;
         _updatePoolRewards(msg.value);
@@ -1433,7 +1443,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
      */
     function distributeTokenFee(
         uint256 tokenAmount
-    ) external onlyRewardDistributor {
+    ) external onlyRewardDistributor nonReentrant {
         if (tokenAmount == 0) revert AmountZero();
 
         // Record balance before transfer to handle fee-on-transfer tokens
@@ -1462,7 +1472,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 newTokenPosition,
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
-    ) external {
+    ) external nonReentrant {
         // Calculate total user position
         uint256 totalUserPosition = 0;
         uint256 totalPendingRewards = 0;
@@ -1568,7 +1578,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 newTokenPosition,
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
-    ) external {
+    ) external nonReentrant {
         bool needsUpdate = _needsPositionUpdate(msg.sender);
         if (needsUpdate) {
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
@@ -1625,7 +1635,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 newTokenPosition,
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
-    ) external {
+    ) external nonReentrant {
         bool needsUpdate = _needsPositionUpdate(msg.sender);
         if (needsUpdate) {
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
@@ -1922,6 +1932,44 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             recipient,
             withdrawAmount,
             true
+        );
+    }
+
+    /**
+     * @notice Set minimum price range percentage
+     * @param _minPriceRangePercentage Minimum price range percentage (in basis points)
+     * @dev Only callable by owner
+     */
+    function setMinPriceRangePercentage(
+        uint256 _minPriceRangePercentage
+    ) external onlyOwner {
+        if (_minPriceRangePercentage == 0) revert InvalidPriceRange();
+        if (_minPriceRangePercentage >= maxPriceRangePercentage)
+            revert InvalidPriceRange();
+
+        minPriceRangePercentage = _minPriceRangePercentage;
+        emit PriceRangePercentageUpdated(
+            minPriceRangePercentage,
+            maxPriceRangePercentage
+        );
+    }
+
+    /**
+     * @notice Set maximum price range percentage
+     * @param _maxPriceRangePercentage Maximum price range percentage (in basis points)
+     * @dev Only callable by owner
+     */
+    function setMaxPriceRangePercentage(
+        uint256 _maxPriceRangePercentage
+    ) external onlyOwner {
+        if (_maxPriceRangePercentage == 0) revert InvalidPriceRange();
+        if (_maxPriceRangePercentage <= minPriceRangePercentage)
+            revert InvalidPriceRange();
+
+        maxPriceRangePercentage = _maxPriceRangePercentage;
+        emit PriceRangePercentageUpdated(
+            minPriceRangePercentage,
+            maxPriceRangePercentage
         );
     }
 
