@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
@@ -21,6 +20,8 @@ error TokenBlocked();
 error OnlyRewardDistributor();
 error OnlyOrderbook();
 error OnlyFactory();
+error OnlyOwner();
+error UnsupportedTokenDecimals();
 error AmountZero();
 error InsufficientShares();
 error InsufficientPoolBalance();
@@ -71,7 +72,7 @@ error OverlappingPriceRange();
  * @dev Users can specify min/max price ranges when adding liquidity
  * @dev Enhanced version with better gas optimization and security
  */
-contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
+contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // Price range struct for concentrated liquidity
@@ -133,6 +134,8 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         address indexed token,
         bool isETH
     );
+
+    event FeeRefunded(address indexed recipient, uint256 amount, bool isETH);
 
     event PoolBalanceUpdated(
         address indexed token,
@@ -217,6 +220,9 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
 
     uint256 public constant SCALE = 1e18;
 
+    // Maximum supported token decimals to prevent overflow
+    uint8 public constant MAX_TOKEN_DECIMALS = 24;
+
     uint8 public tokenDecimals;
 
     // Configurable minimum liquidity requirements
@@ -227,7 +233,8 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
     uint256 public totalEthAdded;
     uint256 public totalEthRemoved;
     uint256 public totalTokensAdded;
-    uint256 public totalTokensRemoved;
+    uint256 public totalTokensRemoved; // Total tokens removed from this pool
+    uint256 public totalTokenRewardsDistributed; // Total token rewards distributed
 
     // Uniswap pair address
     address public uniswapPair;
@@ -267,14 +274,24 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         _;
     }
 
-    constructor(IERC20 _token, address _owner) Ownable(_owner) {
+    modifier onlyOwner() {
+        if (msg.sender != factoryContract.owner()) revert OnlyOwner();
+        _;
+    }
+
+    constructor(IERC20 _token, address _factory) {
         if (address(_token) == address(0)) revert InvalidTokenAddress();
-        if (_owner == address(0)) revert InvalidRecipient();
+        if (_factory == address(0)) revert InvalidRecipient();
 
         tokenContract = _token;
-        factoryContract = IGradientMarketMakerFactory(msg.sender);
+        factoryContract = IGradientMarketMakerFactory(_factory);
 
         tokenDecimals = IERC20Metadata(address(_token)).decimals();
+
+        // Validate token decimals to prevent overflow
+        if (tokenDecimals > MAX_TOKEN_DECIMALS) {
+            revert UnsupportedTokenDecimals();
+        }
 
         minLiquidity = 1e15; // 0.001 ETH minimum (default)
         minTokenLiquidity = 2 * (10 ** tokenDecimals); // Set minimum token liquidity to 2 tokens
@@ -284,6 +301,14 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
      * @notice Receive ETH for reward distribution
      */
     receive() external payable {}
+
+    /**
+     * @notice Get the current owner (factory owner)
+     * @return The current owner of the factory
+     */
+    function owner() public view returns (address) {
+        return factoryContract.owner();
+    }
 
     // =============================== INTERNAL FUNCTIONS ===============================
 
@@ -405,11 +430,16 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
             merkleRoot = newMerkleRoot;
             versionMerkleRoots[currentVersion] = newMerkleRoot;
 
-            // Emit to EventAggregator instead of local event
-            getEventAggregator().emitMerkleRootUpdated(
-                currentVersion,
-                newMerkleRoot
-            );
+            try
+                getEventAggregator().emitMerkleRootUpdated(
+                    currentVersion,
+                    newMerkleRoot
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
 
             emit MerkleRootUpdated(currentVersion, newMerkleRoot);
         }
@@ -726,15 +756,27 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         totalETH += ethAmount;
         totalEthAdded += ethAmount;
 
-        // Emit to EventAggregator
-        getEventAggregator().emitLiquidityEvent(
-            user,
-            address(tokenContract),
-            0, // ETH_ADD
-            ethAmount,
-            minPrice,
-            maxPrice
-        );
+        uint256 eventMinPrice = userPriceRanges[user].isActive
+            ? userPriceRanges[user].minPrice
+            : minPrice;
+        uint256 eventMaxPrice = userPriceRanges[user].isActive
+            ? userPriceRanges[user].maxPrice
+            : maxPrice;
+
+        try
+            getEventAggregator().emitLiquidityEvent(
+                user,
+                address(tokenContract),
+                0, // ETH_ADD
+                ethAmount,
+                eventMinPrice,
+                eventMaxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
 
         // Emit local event
         emit LiquidityDeposited(
@@ -743,8 +785,8 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
             ethAmount,
             ethAmount,
             true,
-            minPrice,
-            maxPrice
+            eventMinPrice,
+            eventMaxPrice
         );
     }
 
@@ -767,8 +809,15 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         }
         if (uniswapPair == address(0)) revert PairDoesNotExist();
 
+        // Record balance before transfer to handle fee-on-transfer tokens
+        uint256 balanceBefore = tokenContract.balanceOf(address(this));
+
         // Transfer tokens from user
         tokenContract.safeTransferFrom(msg.sender, address(this), tokenAmount);
+
+        // Calculate actual received amount (handles fee-on-transfer and rebasing tokens)
+        uint256 actualReceived = tokenContract.balanceOf(address(this)) -
+            balanceBefore;
 
         // Get current market price
         _getCurrentPrice();
@@ -785,11 +834,11 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         // Add to existing position or create new one
         if (tokenProviders[user].position > 0) {
             // User already has token position, add to it
-            tokenProviders[user].position += tokenAmount;
+            tokenProviders[user].position += actualReceived;
         } else {
             // Create new token position
             tokenProviders[user] = ProviderPosition({
-                position: tokenAmount,
+                position: actualReceived,
                 rewardDebt: 0,
                 pendingRewards: 0,
                 lastUpdateVersion: currentVersion
@@ -810,28 +859,40 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
             (tokenProviders[user].position * accTokenRewardPerShare) /
             SCALE;
 
-        totalTokens += tokenAmount;
-        totalTokensAdded += tokenAmount;
+        totalTokens += actualReceived;
+        totalTokensAdded += actualReceived;
 
-        // Emit to EventAggregator
-        getEventAggregator().emitLiquidityEvent(
-            user,
-            address(tokenContract),
-            2, // TOKEN_ADD
-            tokenAmount,
-            minPrice,
-            maxPrice
-        );
+        uint256 eventMinPrice = userPriceRanges[user].isActive
+            ? userPriceRanges[user].minPrice
+            : minPrice;
+        uint256 eventMaxPrice = userPriceRanges[user].isActive
+            ? userPriceRanges[user].maxPrice
+            : maxPrice;
+
+        try
+            getEventAggregator().emitLiquidityEvent(
+                user,
+                address(tokenContract),
+                2, // TOKEN_ADD
+                actualReceived,
+                eventMinPrice,
+                eventMaxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
 
         // Emit local event
         emit LiquidityDeposited(
             user,
             address(tokenContract),
-            tokenAmount,
-            tokenAmount,
+            actualReceived,
+            actualReceived,
             false,
-            minPrice,
-            maxPrice
+            eventMinPrice,
+            eventMaxPrice
         );
     }
 
@@ -1326,6 +1387,11 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
             if (newAccRewardPerShare < accRewardPerShare)
                 revert OverflowInETHRewardCalculation();
             accRewardPerShare = newAccRewardPerShare;
+        } else {
+            // No liquidity exists - immediately refund the ETH
+            (bool success, ) = payable(msg.sender).call{value: ethAmount}("");
+            if (!success) revert ETHTransferFailed();
+            emit FeeRefunded(msg.sender, ethAmount, true);
         }
 
         // Track ETH rewards
@@ -1350,6 +1416,13 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
             if (newAccTokenRewardPerShare < accTokenRewardPerShare)
                 revert OverflowInTokenRewardCalculation();
             accTokenRewardPerShare = newAccTokenRewardPerShare;
+
+            // Track token rewards distributed
+            totalTokenRewardsDistributed += tokenAmount;
+        } else {
+            // No liquidity exists - immediately refund the tokens
+            tokenContract.safeTransfer(msg.sender, tokenAmount);
+            emit FeeRefunded(msg.sender, tokenAmount, false);
         }
     }
 
@@ -1362,12 +1435,22 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         uint256 tokenAmount
     ) external onlyRewardDistributor {
         if (tokenAmount == 0) revert AmountZero();
+
+        // Record balance before transfer to handle fee-on-transfer tokens
+        uint256 balanceBefore = tokenContract.balanceOf(address(this));
+
+        // Transfer tokens from orderbook to this contract
         tokenContract.safeTransferFrom(msg.sender, address(this), tokenAmount);
-        totalTokensAdded += tokenAmount;
-        _updateTokenRewards(tokenAmount);
+
+        // Calculate actual received amount (handles fee-on-transfer and rebasing tokens)
+        uint256 actualReceived = tokenContract.balanceOf(address(this)) -
+            balanceBefore;
+
+        totalTokensAdded += actualReceived;
+        _updateTokenRewards(actualReceived);
         emit PoolFeeDistributed(
             msg.sender,
-            tokenAmount,
+            actualReceived,
             address(tokenContract),
             false
         );
@@ -1486,10 +1569,6 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
     ) external {
-        // Check if user has ETH position with pending rewards
-        if (ethProviders[msg.sender].pendingRewards == 0)
-            revert NoETHLiquidityOrRewards();
-
         bool needsUpdate = _needsPositionUpdate(msg.sender);
         if (needsUpdate) {
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();
@@ -1547,10 +1626,6 @@ contract GradientMarketMakerPoolV3 is Ownable, ReentrancyGuard {
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
     ) external {
-        // Check if user has token position with pending rewards
-        if (tokenProviders[msg.sender].pendingRewards == 0)
-            revert NoTokenLiquidityOrRewards();
-
         bool needsUpdate = _needsPositionUpdate(msg.sender);
         if (needsUpdate) {
             if (merkleRoot == bytes32(0)) revert NoMerkleRootForUpdates();

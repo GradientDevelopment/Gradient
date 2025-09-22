@@ -55,6 +55,12 @@ contract GradientMarketMakerFactory is Ownable {
     ) Ownable(msg.sender) {
         if (address(_gradientRegistry) == address(0)) revert InvalidRegistry();
         gradientRegistry = _gradientRegistry;
+
+        if (address(_eventAggregator) != address(0)) {
+            if (address(_eventAggregator).code.length == 0)
+                revert InvalidEventAggregator();
+        }
+
         eventAggregator = _eventAggregator;
     }
 
@@ -65,8 +71,10 @@ contract GradientMarketMakerFactory is Ownable {
     function setEventAggregator(
         IEventAggregator _eventAggregator
     ) external onlyOwner {
-        if (address(_eventAggregator) == address(0))
-            revert InvalidEventAggregator();
+        if (
+            address(_eventAggregator) == address(0) ||
+            address(_eventAggregator).code.length == 0
+        ) revert InvalidEventAggregator();
         address oldEventAggregator = address(eventAggregator);
         eventAggregator = _eventAggregator;
         emit EventAggregatorUpdated(
@@ -96,7 +104,7 @@ contract GradientMarketMakerFactory is Ownable {
     ) internal view returns (bytes memory bytecode) {
         bytecode = abi.encodePacked(
             type(GradientMarketMakerPoolV3).creationCode,
-            abi.encode(IERC20(token), owner())
+            abi.encode(IERC20(token), address(this))
         );
     }
 
@@ -128,6 +136,7 @@ contract GradientMarketMakerFactory is Ownable {
      */
     function createPool(address token) external returns (address pool) {
         if (token == address(0)) revert InvalidTokenAddress();
+        if (token.code.length == 0) revert InvalidTokenAddress();
         if (getPool[token] != address(0)) revert PoolAlreadyExists();
         if (gradientRegistry.blockedTokens(token)) revert TokenBlocked();
 
@@ -143,8 +152,11 @@ contract GradientMarketMakerFactory is Ownable {
         getToken[pool] = token;
         allPools.push(pool);
 
-        emit PoolCreated(token, pool, allPools.length - 1);
-        eventAggregator.emitPoolCreated(token, pool);
+        try eventAggregator.emitPoolCreated(token, pool) {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
     }
 
     /**
@@ -164,6 +176,7 @@ contract GradientMarketMakerFactory is Ownable {
         uint256 maxPrice
     ) external payable returns (address pool) {
         if (token == address(0)) revert InvalidTokenAddress();
+        if (token.code.length == 0) revert InvalidTokenAddress();
         if (getPool[token] != address(0)) revert PoolAlreadyExists();
         if (gradientRegistry.blockedTokens(token)) revert TokenBlocked();
         if (msg.value != initialEthAmount) revert EthAmountMismatch();
@@ -177,9 +190,6 @@ contract GradientMarketMakerFactory is Ownable {
         getPool[token] = pool;
         getToken[pool] = token;
         allPools.push(pool);
-
-        // Emit pool created event
-        emit PoolCreated(token, pool, allPools.length - 1);
 
         // Add initial liquidity for the specified user
         if (initialEthAmount > 0) {
@@ -196,7 +206,7 @@ contract GradientMarketMakerFactory is Ownable {
                 initialTokenAmount
             );
             // Approve pool to spend tokens
-            IERC20(token).approve(pool, initialTokenAmount);
+            IERC20(token).forceApprove(pool, initialTokenAmount);
             // Add token liquidity for the specified user
             IGradientMarketMakerPoolV3(pool).addTokenLiquidityForUser(
                 msg.sender,
@@ -204,10 +214,15 @@ contract GradientMarketMakerFactory is Ownable {
                 minPrice,
                 maxPrice
             );
+            // Reset allowance to zero to prevent future unexpected pulls
+            IERC20(token).forceApprove(pool, 0);
         }
 
-        // Emit event to EventAggregator
-        eventAggregator.emitPoolCreated(token, pool);
+        try eventAggregator.emitPoolCreated(token, pool) {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
     }
 
     /**
