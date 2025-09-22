@@ -57,10 +57,10 @@ contract GradientMarketMakerFactory is Ownable {
         gradientRegistry = _gradientRegistry;
 
         // Validate EventAggregator is non-zero and is a contract
-        if (
-            address(_eventAggregator) == address(0) ||
-            address(_eventAggregator).code.length == 0
-        ) revert InvalidEventAggregator();
+        if (address(_eventAggregator) != address(0)) {
+            if (address(_eventAggregator).code.length == 0)
+                revert InvalidEventAggregator();
+        }
 
         eventAggregator = _eventAggregator;
     }
