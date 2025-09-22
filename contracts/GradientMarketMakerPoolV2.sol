@@ -283,11 +283,10 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
             // Track ETH rewards
             rewardBalance += ethAmount;
         } else {
-            // No liquidity exists - immediately refund the fee
+            emit FeeRefunded(msg.sender, ethAmount, true);
+
             (bool success, ) = payable(msg.sender).call{value: ethAmount}("");
             if (!success) revert ETHTransferFailed();
-
-            emit FeeRefunded(msg.sender, ethAmount, true);
         }
     }
 
@@ -314,9 +313,9 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
             totalTokenRewardsDistributed += tokenAmount;
         } else {
             // No liquidity exists - immediately refund the tokens
-            IERC20(token).safeTransfer(msg.sender, tokenAmount);
-
             emit FeeRefunded(msg.sender, tokenAmount, false);
+
+            IERC20(token).safeTransfer(msg.sender, tokenAmount);
         }
     }
 
@@ -1154,7 +1153,12 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
     /**
      * @notice Distributes fee distribution from orderbook to be distributed to market makers
      */
-    function distributePoolFee() external payable onlyRewardDistributor {
+    function distributePoolFee()
+        external
+        payable
+        onlyRewardDistributor
+        nonReentrant
+    {
         if (msg.value == 0) revert NoETHSent();
         totalEthAdded += msg.value;
         _updatePoolRewards(msg.value);
@@ -1168,7 +1172,7 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
      */
     function distributeTokenFee(
         uint256 tokenAmount
-    ) external onlyRewardDistributor {
+    ) external onlyRewardDistributor nonReentrant {
         if (tokenAmount == 0) revert AmountZero();
 
         // Record balance before transfer to handle fee-on-transfer tokens
