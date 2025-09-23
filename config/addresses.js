@@ -23,7 +23,11 @@ const ROUTER_ADDRESSES = {
   
   const GREY_TOKEN_ADDRESS = "0xa776A95223C500E81Cb0937B291140fF550ac3E4";
   
+  // Fulfiller address - change this to the desired fulfiller address
+  const FULFILLER_ADDRESS = "0x87cCc3e6FD7bA85487CE832D1ce0E7c6E4B56Af3"; // Replace with actual fulfiller address
+  
   module.exports = {
     ROUTER_ADDRESSES,
     GREY_TOKEN_ADDRESS,
+    FULFILLER_ADDRESS,
   };

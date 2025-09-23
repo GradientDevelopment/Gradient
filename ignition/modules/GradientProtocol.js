@@ -2,6 +2,7 @@ const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 const {
   ROUTER_ADDRESSES,
   GREY_TOKEN_ADDRESS,
+  FULFILLER_ADDRESS,
 } = require("../../config/addresses");
 
 module.exports = buildModule("GradientProtocol", (m) => {
@@ -62,9 +63,9 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-  // 9. Authorize deployer as fulfiller in registry
+  // 9. Authorize fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
-    deployer, // deployer address
+    FULFILLER_ADDRESS, // fulfiller address from config
     true // authorized
   ]);
 
