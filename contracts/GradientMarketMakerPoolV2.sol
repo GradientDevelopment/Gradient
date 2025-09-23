@@ -664,7 +664,8 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
 
     /**
      * @notice Remove liquidity with optional position update
-     * @param shares Percentage of pool to withdraw (in basis points, 10000 = 100%)
+     * @param ethShares Percentage of ETH pool to withdraw (in basis points, 10000 = 100%)
+     * @param tokenShares Percentage of token pool to withdraw (in basis points, 10000 = 100%)
      * @param minEthAmount Minimum amount of ETH to receive
      * @param minTokenAmount Minimum amount of tokens to receive
      * @param proof Merkle proof for position update (required if user has pending updates)
@@ -672,7 +673,8 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
      * @param newTokenPosition New token position (required if proof provided)
      */
     function removeLiquidityWithProof(
-        uint256 shares,
+        uint256 ethShares,
+        uint256 tokenShares,
         uint256 minEthAmount,
         uint256 minTokenAmount,
         bytes32[] calldata proof,
@@ -681,7 +683,10 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
         uint256 ethRewardsToAdd,
         uint256 tokenRewardsToAdd
     ) external isNotBlocked nonReentrant {
-        if (shares <= 0 || shares > 10000) revert InvalidSharesPercentage();
+        if (ethShares <= 0 || ethShares > 10000)
+            revert InvalidSharesPercentage();
+        if (tokenShares <= 0 || tokenShares > 10000)
+            revert InvalidSharesPercentage();
 
         // Check if user needs position update for either asset type - only if they have existing liquidity
         bool needsUpdate = _needsPositionUpdate(msg.sender);
@@ -712,9 +717,9 @@ contract GradientMarketMakerPoolV2 is ReentrancyGuard {
             );
         }
 
-        // Then remove liquidity
-        _removeETHLiquidity(shares, minEthAmount);
-        _removeTokenLiquidity(shares, minTokenAmount);
+        // Then remove liquidity with separate percentages
+        _removeETHLiquidity(ethShares, minEthAmount);
+        _removeTokenLiquidity(tokenShares, minTokenAmount);
     }
 
     /**
