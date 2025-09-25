@@ -638,10 +638,8 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     /**
      * @notice Add both ETH and token liquidity with price range and optional position update
      * @param tokenAmount Amount of tokens to deposit
-     * @param ethMinPrice Minimum price for ETH liquidity position
-     * @param ethMaxPrice Maximum price for ETH liquidity position
-     * @param tokenMinPrice Minimum price for token liquidity position
-     * @param tokenMaxPrice Maximum price for token liquidity position
+     * @param minPrice Minimum price for liquidity position (applies to both ETH and token positions)
+     * @param maxPrice Maximum price for liquidity position (applies to both ETH and token positions)
      * @param proof Merkle proof for position update (required if user has pending updates)
      * @param newETHPosition New ETH position value (required if proof provided)
      * @param newTokenPosition New token position value (required if proof provided)
@@ -650,10 +648,8 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
      */
     function addLiquidity(
         uint256 tokenAmount,
-        uint256 ethMinPrice,
-        uint256 ethMaxPrice,
-        uint256 tokenMinPrice,
-        uint256 tokenMaxPrice,
+        uint256 minPrice,
+        uint256 maxPrice,
         bytes32[] calldata proof,
         uint256 newETHPosition,
         uint256 newTokenPosition,
@@ -662,8 +658,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     ) external payable isNotBlocked nonReentrant {
         if (msg.value < minLiquidity) revert ETHAmountBelowMinimum();
         if (tokenAmount < minTokenLiquidity) revert TokenAmountBelowMinimum();
-        _validatePriceRange(ethMinPrice, ethMaxPrice);
-        _validatePriceRange(tokenMinPrice, tokenMaxPrice);
+        _validatePriceRange(minPrice, maxPrice);
 
         // Check if user needs position update for either asset type - only if they have existing liquidity
         bool needsUpdate = _needsPositionUpdate(msg.sender);
@@ -695,8 +690,8 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         }
 
         // Then add liquidity with price ranges
-        _addETHLiquidity(msg.sender, msg.value, ethMinPrice, ethMaxPrice);
-        _addTokenLiquidity(msg.sender, tokenAmount, ethMinPrice, ethMaxPrice);
+        _addETHLiquidity(msg.sender, msg.value, minPrice, maxPrice);
+        _addTokenLiquidity(msg.sender, tokenAmount, minPrice, maxPrice);
     }
 
     /**
