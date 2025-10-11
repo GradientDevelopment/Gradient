@@ -13,7 +13,7 @@ module.exports = {
       viaIR: true,
       optimizer: {
         enabled: true,
-        runs: 200
+        runs: 1
       }
     }
   },
@@ -38,9 +38,16 @@ module.exports = {
     },
   },
   etherscan: {
-    apiKey: {
-      mainnet: process.env.ETHERSCAN_API_KEY,
-      bscTestnet: process.env.BSCSCAN_API_KEY
-    }
+    apiKey: process.env.ETHERSCAN_API_KEY,
+    customChains: [
+      {
+        network: "bsctest",
+        chainId: 97,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=97",
+          browserURL: "https://testnet.bscscan.com"
+        }
+      }
+    ]
   },
 };

@@ -1049,6 +1049,23 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         );
         if (!success) revert ETHTransferFailed();
 
+        // Emit EventAggregator event
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                1, // ETH_REMOVE
+                amountToWithdraw,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
+
+        // Emit local event
         emit LiquidityWithdrawn(
             msg.sender,
             address(tokenContract),
@@ -1133,6 +1150,23 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         if (amountToWithdraw < minTokenAmount) revert InsufficientWithdrawal();
         tokenContract.safeTransfer(msg.sender, amountToWithdraw);
 
+        // Emit EventAggregator event
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                3, // TOKEN_REMOVE
+                amountToWithdraw,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
+
+        // Emit local event
         emit LiquidityWithdrawn(
             msg.sender,
             address(tokenContract),
@@ -1275,6 +1309,23 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
 
         // Emit separate events for each position
         if (ethAmountToWithdraw > 0) {
+            // Emit EventAggregator event
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    1, // ETH_REMOVE
+                    ethAmountToWithdraw,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
+
+            // Emit local event
             emit LiquidityWithdrawn(
                 msg.sender,
                 address(tokenContract),
@@ -1287,6 +1338,23 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         }
 
         if (tokenAmountToWithdraw > 0) {
+            // Emit EventAggregator event
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    3, // TOKEN_REMOVE
+                    tokenAmountToWithdraw,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
+
+            // Emit local event
             emit LiquidityWithdrawn(
                 msg.sender,
                 address(tokenContract),
@@ -1319,6 +1387,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         }
 
         _updateMerkleRootAfterTrade(newMerkleRoot);
+
+        // Emit EventAggregator event for trade execution
+        try
+            getEventAggregator().emitTradeExecuted(
+                msg.sender,
+                0, // BUY
+                ethAmount,
+                tokenAmount
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
+
         emit PoolBalanceUpdated(
             address(tokenContract),
             totalETH,
@@ -1348,6 +1431,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         if (!success) revert ETHTransferToOrderbookFailed();
 
         _updateMerkleRootAfterTrade(newMerkleRoot);
+
+        // Emit EventAggregator event for trade execution
+        try
+            getEventAggregator().emitTradeExecuted(
+                msg.sender,
+                1, // SELL
+                ethAmount,
+                tokenAmount
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
+
         emit PoolBalanceUpdated(
             address(tokenContract),
             totalETH,
@@ -1555,6 +1653,19 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             totalEthRemoved += ethRewards;
             (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
             if (!success) revert ETHWithdrawalFailed();
+
+            // Emit EventAggregator event for ETH rewards
+            try
+                getEventAggregator().emitETHRewardsClaimed(
+                    msg.sender,
+                    address(tokenContract),
+                    ethRewards
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
 
         if (tokenProviderRewards > 0) {
@@ -1562,6 +1673,19 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
                 tokenProviderRewards
             );
             tokenContract.safeTransfer(msg.sender, denormalizedRewards);
+
+            // Emit EventAggregator event for token rewards
+            try
+                getEventAggregator().emitTokenRewardsClaimed(
+                    msg.sender,
+                    address(tokenContract),
+                    denormalizedRewards
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
 
         emit FeeClaimed(msg.sender, totalRewards, address(tokenContract), true);
@@ -1620,6 +1744,19 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         totalEthRemoved += ethRewards;
         (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
         if (!success) revert ETHWithdrawalFailed();
+
+        // Emit EventAggregator event for ETH rewards
+        try
+            getEventAggregator().emitETHRewardsClaimed(
+                msg.sender,
+                address(tokenContract),
+                ethRewards
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
 
         emit FeeClaimed(msg.sender, ethRewards, address(tokenContract), true);
     }
@@ -1687,6 +1824,19 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         );
         totalTokensRemoved += denormalizedRewards;
         tokenContract.safeTransfer(msg.sender, denormalizedRewards);
+
+        // Emit EventAggregator event for token rewards
+        try
+            getEventAggregator().emitTokenRewardsClaimed(
+                msg.sender,
+                address(tokenContract),
+                denormalizedRewards
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
 
         emit FeeClaimed(
             msg.sender,
