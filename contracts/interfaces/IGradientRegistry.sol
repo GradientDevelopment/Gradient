@@ -120,4 +120,13 @@ interface IGradientRegistry {
     function authorizedFulfillers(
         address fulfiller
     ) external view returns (bool);
+
+    // Partner token management functions (for market maker fee splits)
+    function setPartnerToken(address token, address partnerWallet) external;
+
+    function removePartnerToken(address token) external;
+
+    function checkIsPartnerToken(address token) external view returns (bool);
+
+    function getPartnerWallet(address token) external view returns (address);
 }

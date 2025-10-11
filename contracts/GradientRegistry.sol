@@ -36,6 +36,10 @@ contract GradientRegistry is AccessControl {
     // Mapping for authorized fulfillers
     mapping(address => bool) public authorizedFulfillers;
 
+    // Partner token management (for market maker fee splits)
+    mapping(address => address) public partnerTokenWallets;
+    mapping(address => bool) public isPartnerToken;
+
     // Events
     event ContractAddressUpdated(
         string indexed contractName,
@@ -54,6 +58,8 @@ contract GradientRegistry is AccessControl {
     event RegistryChangeExecuted(bytes32 indexed changeId);
     event RegistryChangeCancelled(bytes32 indexed changeId);
     event TimelockDurationUpdated(uint256 oldDuration, uint256 newDuration);
+    event PartnerTokenSet(address indexed token, address indexed partnerWallet);
+    event PartnerTokenRemoved(address indexed token);
 
     constructor() {
         // Set up roles
@@ -463,5 +469,60 @@ contract GradientRegistry is AccessControl {
         address account
     ) public override onlyRole(DEFAULT_ADMIN_ROLE) {
         super.renounceRole(role, account);
+    }
+
+    // ========================== Partner Token Management (Market Maker Fee Splits) ==========================
+
+    /**
+     * @notice Set a token as a partner token with its designated wallet
+     * @param token The address of the token to set as partner
+     * @param partnerWallet The wallet address for the partner team
+     * @dev Only callable by ADMIN_ROLE
+     */
+    function setPartnerToken(
+        address token,
+        address partnerWallet
+    ) external onlyRole(ADMIN_ROLE) {
+        require(token != address(0), "Invalid token address");
+        require(partnerWallet != address(0), "Invalid partner wallet address");
+        require(!isPartnerToken[token], "Token is already a partner token");
+
+        isPartnerToken[token] = true;
+        partnerTokenWallets[token] = partnerWallet;
+
+        emit PartnerTokenSet(token, partnerWallet);
+    }
+
+    /**
+     * @notice Remove a token from partner tokens
+     * @param token The address of the token to remove from partners
+     * @dev Only callable by ADMIN_ROLE
+     */
+    function removePartnerToken(address token) external onlyRole(ADMIN_ROLE) {
+        require(token != address(0), "Invalid token address");
+        require(isPartnerToken[token], "Token is not a partner token");
+
+        isPartnerToken[token] = false;
+        partnerTokenWallets[token] = address(0);
+
+        emit PartnerTokenRemoved(token);
+    }
+
+    /**
+     * @notice Check if a token is a partner token
+     * @param token The address of the token to check
+     * @return bool Whether the token is a partner token
+     */
+    function checkIsPartnerToken(address token) external view returns (bool) {
+        return isPartnerToken[token];
+    }
+
+    /**
+     * @notice Get the partner wallet for a token
+     * @param token The address of the token
+     * @return address The partner wallet address (address(0) if not partner)
+     */
+    function getPartnerWallet(address token) external view returns (address) {
+        return partnerTokenWallets[token];
     }
 }

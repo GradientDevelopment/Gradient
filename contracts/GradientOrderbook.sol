@@ -73,20 +73,45 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Counter for generating unique order IDs
     uint256 private _orderIdCounter;
 
-    /// @notice Fee percentage charged on ETH fees (in basis points, 1 = 0.01%)
-    uint256 public ethFeePercentage;
+    /// @notice Default fee percentage charged on all trades (in basis points, 1 = 0.01%)
+    uint256 public defaultFeePercentage;
 
-    /// @notice Fee percentage charged on token fees (in basis points, 1 = 0.01%)
-    uint256 public tokenFeePercentage;
+    /// @notice Token-specific fee percentages (in basis points, 1 = 0.01%)
+    /// @dev Default is 100 basis points (1%) for all tokens
+    mapping(address => uint256) public tokenSpecificFeePercentage;
 
     /// @notice Maximum fee percentage that can be set (in basis points)
     uint256 public constant MAX_FEE_PERCENTAGE = 500; // 5%
+
+    /// @notice Minimum fee percentage that can be set (in basis points)
+    uint256 public constant MIN_FEE_PERCENTAGE = 50; // 0.5%
+
+    /// @notice Maximum token-specific fee percentage (in basis points)
+    uint256 public constant MAX_TOKEN_SPECIFIC_FEE_PERCENTAGE = 300; // 3%
 
     /// @notice Total ETH fees collected
     uint256 public totalEthFeesCollected;
 
     /// @notice Total token fees collected per token
     mapping(address => uint256) public totalTokenFeesCollected;
+
+    /// @notice Partner ETH fees collected per partner token
+    mapping(address => uint256) public partnerEthFeesCollected;
+
+    /// @notice Partner token fees collected per partner token
+    mapping(address => uint256) public partnerTokenFeesCollected;
+
+    /// @notice Partner ETH fees claimed per partner token
+    mapping(address => uint256) public partnerEthFeesClaimed;
+
+    /// @notice Partner token fees claimed per partner token
+    mapping(address => uint256) public partnerTokenFeesClaimed;
+
+    /// @notice Platform ETH fees claimed
+    uint256 public platformEthFeesClaimed;
+
+    /// @notice Platform token fees claimed per token
+    mapping(address => uint256) public platformTokenFeesClaimed;
 
     /// @notice Mapping from order ID to Order struct
     mapping(uint256 => Order) public orders;
@@ -160,14 +185,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 executionPrice
     );
 
-    /// @notice Emitted when ETH fee percentage is updated
-    event EthFeePercentageUpdated(
+    /// @notice Emitted when default fee percentage is updated
+    event DefaultFeePercentageUpdated(
         uint256 oldFeePercentage,
         uint256 newFeePercentage
     );
 
-    /// @notice Emitted when token fee percentage is updated
-    event TokenFeePercentageUpdated(
+    /// @notice Emitted when token-specific fee percentage is updated
+    event TokenSpecificFeePercentageUpdated(
+        address indexed token,
         uint256 oldFeePercentage,
         uint256 newFeePercentage
     );
@@ -179,6 +205,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     event TokenFeesWithdrawn(
         address indexed token,
         address indexed recipient,
+        uint256 amount
+    );
+
+    /// @notice Emitted when partner ETH fees are claimed
+    event PartnerEthFeesClaimed(
+        address indexed token,
+        address indexed partnerWallet,
+        uint256 amount
+    );
+
+    /// @notice Emitted when partner token fees are claimed
+    event PartnerTokenFeesClaimed(
+        address indexed token,
+        address indexed partnerWallet,
         uint256 amount
     );
 
@@ -208,6 +248,14 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address indexed token,
         uint256 amount,
         uint256 totalFee
+    );
+
+    /// @notice Emitted when fees are distributed to teams (market maker only)
+    event FeeDistributedToTeams(
+        address indexed token,
+        uint256 grayTeamFee,
+        uint256 partnerTeamFee,
+        uint256 totalTeamFee
     );
 
     /// @notice Emitted when MM fee distribution percentage is updated
@@ -277,8 +325,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
-        ethFeePercentage = 50; // 0.5% for ETH fees
-        tokenFeePercentage = 50; // 0.5% for token fees
+        defaultFeePercentage = 100; // 1% default fee for all trades
 
         minOrderSize = 1000000000000; // 0.000001 ETH
         maxOrderSize = 1000 ether;
@@ -291,9 +338,18 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Internal function to calculate and collect ETH fees
     /// @param amount Amount in ETH to calculate fee from
+    /// @param token Token address for potential token-specific fee
     /// @return uint256 Fee amount collected
-    function _collectEthFee(uint256 amount) internal returns (uint256) {
-        uint256 feeAmount = (amount * ethFeePercentage) / DIVISOR;
+    function _collectEthFee(
+        uint256 amount,
+        address token
+    ) internal returns (uint256) {
+        // Use token-specific fee if set, otherwise use default fee
+        uint256 feePercentage = tokenSpecificFeePercentage[token] > 0
+            ? tokenSpecificFeePercentage[token]
+            : defaultFeePercentage;
+
+        uint256 feeAmount = (amount * feePercentage) / DIVISOR;
         totalEthFeesCollected += feeAmount;
         return feeAmount;
     }
@@ -306,9 +362,125 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 amount,
         address token
     ) internal returns (uint256) {
-        uint256 feeAmount = (amount * tokenFeePercentage) / DIVISOR;
+        // Use token-specific fee if set, otherwise use default fee
+        uint256 feePercentage = tokenSpecificFeePercentage[token] > 0
+            ? tokenSpecificFeePercentage[token]
+            : defaultFeePercentage;
+
+        uint256 feeAmount = (amount * feePercentage) / DIVISOR;
         totalTokenFeesCollected[token] += feeAmount;
         return feeAmount;
+    }
+
+    /// @notice Internal function to distribute market maker fees according to new split logic
+    /// @param totalFee Total fee amount to distribute
+    /// @param token Token address for partner token check
+    /// @param marketMakerPool Market maker pool address for distribution
+    function _distributeMarketMakerTokenFees(
+        uint256 totalFee,
+        address token,
+        address marketMakerPool
+    ) internal {
+        require(totalFee > 0, "Fee amount must be greater than 0");
+        require(token != address(0), "Invalid token address");
+        require(marketMakerPool != address(0), "Invalid market maker pool");
+
+        // 50% to market makers (proportional distribution)
+        uint256 marketMakerFee = totalFee / 2;
+
+        // Distribute to market maker pool
+        if (marketMakerFee > 0) {
+            IERC20(token).approve(marketMakerPool, marketMakerFee);
+            IGradientMarketMakerPoolV3(marketMakerPool).distributeTokenFee(
+                marketMakerFee
+            );
+            emit FeeDistributedToPool(
+                marketMakerPool,
+                token,
+                marketMakerFee,
+                totalFee
+            );
+        }
+
+        // 50% to teams - accumulate in totalTokenFeesCollected for later distribution
+        uint256 teamFee = totalFee / 2;
+
+        if (gradientRegistry.checkIsPartnerToken(token)) {
+            // Split 50% between GRAY team and partner team (25% each)
+            uint256 grayTeamFee = teamFee / 2;
+            uint256 partnerTeamFee = teamFee / 2;
+
+            // Accumulate fees for later distribution
+            totalTokenFeesCollected[token] += grayTeamFee;
+            partnerTokenFeesCollected[token] += partnerTeamFee;
+
+            emit FeeDistributedToTeams(
+                token,
+                grayTeamFee,
+                partnerTeamFee,
+                teamFee
+            );
+        } else {
+            // All 50% to GRAY team - accumulate for later distribution
+            totalTokenFeesCollected[token] += teamFee;
+
+            emit FeeDistributedToTeams(token, teamFee, 0, teamFee);
+        }
+    }
+
+    /// @notice Internal function to distribute market maker ETH fees according to new split logic
+    /// @param totalFee Total ETH fee amount to distribute
+    /// @param token Token address for partner token check
+    /// @param marketMakerPool Market maker pool address for distribution
+    function _distributeMarketMakerEthFees(
+        uint256 totalFee,
+        address token,
+        address marketMakerPool
+    ) internal {
+        require(totalFee > 0, "Fee amount must be greater than 0");
+        require(token != address(0), "Invalid token address");
+        require(marketMakerPool != address(0), "Invalid market maker pool");
+
+        // 50% to market makers (proportional distribution)
+        uint256 marketMakerFee = totalFee / 2;
+
+        // Distribute to market maker pool
+        if (marketMakerFee > 0) {
+            IGradientMarketMakerPoolV3(marketMakerPool).distributePoolFee{
+                value: marketMakerFee
+            }();
+            emit FeeDistributedToPool(
+                marketMakerPool,
+                token,
+                marketMakerFee,
+                totalFee
+            );
+        }
+
+        // 50% to teams - accumulate in totalEthFeesCollected for later distribution
+        uint256 teamFee = totalFee / 2;
+
+        if (gradientRegistry.checkIsPartnerToken(token)) {
+            // Split 50% between GRAY team and partner team (25% each)
+            uint256 grayTeamFee = teamFee / 2;
+            uint256 partnerTeamFee = teamFee / 2;
+
+            // Accumulate fees for later distribution
+            totalEthFeesCollected += grayTeamFee;
+            partnerEthFeesCollected[token] += partnerTeamFee;
+
+            emit FeeDistributedToTeams(
+                token,
+                grayTeamFee,
+                partnerTeamFee,
+                teamFee
+            );
+        } else {
+            // All 50% to GRAY team - accumulate for later distribution
+            totalEthFeesCollected += teamFee;
+
+            emit FeeDistributedToTeams(token, teamFee, 0, teamFee);
+        }
     }
 
     /// @notice Adds an order to its appropriate queue
@@ -692,7 +864,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 paymentAmount = (actualFillAmount * sellOrder.price) / 1e18; // Use sell price for limit orders
 
         // Calculate fees from receiving amounts
-        uint256 buyerFee = _collectEthFee(paymentAmount); // ETH fee from buyer's payment
+        uint256 buyerFee = _collectEthFee(paymentAmount, sellOrder.token); // ETH fee from buyer's payment
         uint256 sellerFee = _collectTokenFee(tokenAmount, sellOrder.token); // Token fee from seller's tokens
 
         // Transfer ETH to seller (buyer pays ETH fee)
@@ -827,7 +999,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 paymentAmount = (actualFillAmount * executionPrice) / 1e18;
 
         // Calculate fees from receiving amounts
-        uint256 buyerFee = _collectEthFee(paymentAmount); // ETH fee from buyer's payment
+        uint256 buyerFee = _collectEthFee(paymentAmount, sellOrder.token); // ETH fee from buyer's payment
         uint256 sellerFee = _collectTokenFee(tokenAmount, sellOrder.token); // Token fee from seller's tokens
 
         // Transfer ETH to seller (buyer pays ETH fee)
@@ -976,22 +1148,12 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             uint256 tokenFee = _collectTokenFee(actualTokenAmount, order.token);
             uint256 netTokenAmount = actualTokenAmount - tokenFee;
 
-            // Distribute market maker fee from already collected fees
-            uint256 feeForPool = (tokenFee * mmFeeDistributionPercentage) /
-                DIVISOR;
-            totalTokenFeesCollected[order.token] -= feeForPool;
-            if (feeForPool > 0) {
-                // Approve tokens to market maker pool for fee distribution
-                IERC20(order.token).approve(marketMakerPool, feeForPool);
-                // Distribute token fee to market maker pool
-                IGradientMarketMakerPoolV3(marketMakerPool).distributeTokenFee(
-                    feeForPool
-                );
-                emit FeeDistributedToPool(
-                    marketMakerPool,
+            // Distribute fees using new market maker split logic (50% to market makers, 50% to teams)
+            if (tokenFee > 0) {
+                _distributeMarketMakerTokenFees(
+                    tokenFee,
                     order.token,
-                    feeForPool,
-                    tokenFee
+                    marketMakerPool
                 );
             }
 
@@ -1014,22 +1176,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             );
 
             // Calculate fee from received ETH and deduct from user
-            uint256 ethFee = _collectEthFee(paymentAmount);
+            uint256 ethFee = _collectEthFee(paymentAmount, order.token);
             uint256 netEthAmount = paymentAmount - ethFee;
 
-            // Distribute fees to market maker pool
-            uint256 feeForPool = (ethFee * mmFeeDistributionPercentage) /
-                DIVISOR;
-            totalEthFeesCollected -= feeForPool;
-            if (feeForPool > 0) {
-                IGradientMarketMakerPoolV3(marketMakerPool).distributePoolFee{
-                    value: feeForPool
-                }();
-                emit FeeDistributedToPool(
-                    marketMakerPool,
+            // Distribute fees using new market maker split logic (50% to market makers, 50% to teams)
+            if (ethFee > 0) {
+                _distributeMarketMakerEthFees(
+                    ethFee,
                     order.token,
-                    feeForPool,
-                    ethFee
+                    marketMakerPool
                 );
             }
 
@@ -1154,7 +1309,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
                 );
 
             // Calculate fee from received ETH and deduct from user (sell order receives ETH)
-            uint256 ethFee = _collectEthFee(ethReceived);
+            uint256 ethFee = _collectEthFee(ethReceived, order.token);
             uint256 netEthAmount = ethReceived - ethFee;
             (bool success, ) = order.owner.call{value: netEthAmount}("");
             require(success, "ETH transfer to seller failed");
@@ -1457,32 +1612,58 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     // ========================== Admin Functions ==========================
 
-    /// @notice Sets the ETH fee percentage
+    /// @notice Sets the default fee percentage for all trades
     /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
     /// @dev Only callable by contract owner
-    function setEthFeePercentage(uint256 newFeePercentage) external onlyOwner {
-        require(
-            newFeePercentage <= MAX_FEE_PERCENTAGE,
-            "Fee percentage too high"
-        );
-        uint256 oldFeePercentage = ethFeePercentage;
-        ethFeePercentage = newFeePercentage;
-        emit EthFeePercentageUpdated(oldFeePercentage, newFeePercentage);
-    }
-
-    /// @notice Sets the token fee percentage
-    /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
-    /// @dev Only callable by contract owner
-    function setTokenFeePercentage(
+    function setDefaultFeePercentage(
         uint256 newFeePercentage
     ) external onlyOwner {
         require(
             newFeePercentage <= MAX_FEE_PERCENTAGE,
             "Fee percentage too high"
         );
-        uint256 oldFeePercentage = tokenFeePercentage;
-        tokenFeePercentage = newFeePercentage;
-        emit TokenFeePercentageUpdated(oldFeePercentage, newFeePercentage);
+        uint256 oldFeePercentage = defaultFeePercentage;
+        defaultFeePercentage = newFeePercentage;
+        emit DefaultFeePercentageUpdated(oldFeePercentage, newFeePercentage);
+    }
+
+    /// @notice Sets the token-specific fee percentage for a given token
+    /// @param token Token address to set fee for
+    /// @param newFeePercentage New fee percentage in basis points (1 = 0.01%)
+    /// @dev Only callable by contract owner. Fee must be between 0.5% and 3%
+    function setTokenSpecificFeePercentage(
+        address token,
+        uint256 newFeePercentage
+    ) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(
+            newFeePercentage >= MIN_FEE_PERCENTAGE,
+            "Fee percentage too low"
+        );
+        require(
+            newFeePercentage <= MAX_TOKEN_SPECIFIC_FEE_PERCENTAGE,
+            "Fee percentage too high"
+        );
+        uint256 oldFeePercentage = tokenSpecificFeePercentage[token];
+        tokenSpecificFeePercentage[token] = newFeePercentage;
+        emit TokenSpecificFeePercentageUpdated(
+            token,
+            oldFeePercentage,
+            newFeePercentage
+        );
+    }
+
+    /// @notice Removes token-specific fee percentage for a given token (reverts to default)
+    /// @param token Token address to remove specific fee for
+    /// @dev Only callable by contract owner. Sets token-specific fee to 0, so it uses default
+    function removeTokenSpecificFeePercentage(
+        address token
+    ) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        uint256 oldFeePercentage = tokenSpecificFeePercentage[token];
+        require(oldFeePercentage > 0, "No specific fee set for this token");
+        tokenSpecificFeePercentage[token] = 0;
+        emit TokenSpecificFeePercentageUpdated(token, oldFeePercentage, 0);
     }
 
     /**
@@ -1505,14 +1686,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @dev Only callable by contract owner
     function withdrawEthFees(address payable recipient) external onlyOwner {
         require(recipient != address(0), "Invalid recipient");
-        uint256 amount = totalEthFeesCollected;
-        require(amount > 0, "No ETH fees to withdraw");
+        uint256 claimableAmount = totalEthFeesCollected -
+            platformEthFeesClaimed;
+        require(claimableAmount > 0, "No ETH fees to withdraw");
 
-        totalEthFeesCollected = 0;
-        (bool success, ) = recipient.call{value: amount}("");
+        platformEthFeesClaimed += claimableAmount;
+        (bool success, ) = recipient.call{value: claimableAmount}("");
         require(success, "ETH fee withdrawal failed");
 
-        emit EthFeesWithdrawn(recipient, amount);
+        emit EthFeesWithdrawn(recipient, claimableAmount);
     }
 
     /// @notice Withdraws collected token fees to the specified address
@@ -1525,13 +1707,67 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     ) external onlyOwner {
         require(token != address(0), "Invalid token address");
         require(recipient != address(0), "Invalid recipient");
-        uint256 amount = totalTokenFeesCollected[token];
-        require(amount > 0, "No token fees to withdraw");
+        uint256 claimableAmount = totalTokenFeesCollected[token] -
+            platformTokenFeesClaimed[token];
+        require(claimableAmount > 0, "No token fees to withdraw");
 
-        totalTokenFeesCollected[token] = 0;
-        IERC20(token).safeTransfer(recipient, amount);
+        platformTokenFeesClaimed[token] += claimableAmount;
+        IERC20(token).safeTransfer(recipient, claimableAmount);
 
-        emit TokenFeesWithdrawn(token, recipient, amount);
+        emit TokenFeesWithdrawn(token, recipient, claimableAmount);
+    }
+
+    /// @notice Claim partner ETH fees for a specific token
+    /// @param token Address of the partner token to claim fees for
+    /// @dev Only callable by the registered partner wallet for the token
+    function claimPartnerEthFees(address token) external {
+        require(token != address(0), "Invalid token address");
+        require(
+            gradientRegistry.checkIsPartnerToken(token),
+            "Token is not a partner token"
+        );
+
+        address partnerWallet = gradientRegistry.getPartnerWallet(token);
+        require(
+            msg.sender == partnerWallet,
+            "Only partner wallet can claim fees"
+        );
+
+        uint256 claimableAmount = partnerEthFeesCollected[token] -
+            partnerEthFeesClaimed[token];
+        require(claimableAmount > 0, "No partner ETH fees to claim");
+
+        partnerEthFeesClaimed[token] += claimableAmount;
+        (bool success, ) = payable(msg.sender).call{value: claimableAmount}("");
+        require(success, "ETH fee transfer failed");
+
+        emit PartnerEthFeesClaimed(token, msg.sender, claimableAmount);
+    }
+
+    /// @notice Claim partner token fees for a specific token
+    /// @param token Address of the partner token to claim fees for
+    /// @dev Only callable by the registered partner wallet for the token
+    function claimPartnerTokenFees(address token) external {
+        require(token != address(0), "Invalid token address");
+        require(
+            gradientRegistry.checkIsPartnerToken(token),
+            "Token is not a partner token"
+        );
+
+        address partnerWallet = gradientRegistry.getPartnerWallet(token);
+        require(
+            msg.sender == partnerWallet,
+            "Only partner wallet can claim fees"
+        );
+
+        uint256 claimableAmount = partnerTokenFeesCollected[token] -
+            partnerTokenFeesClaimed[token];
+        require(claimableAmount > 0, "No partner token fees to claim");
+
+        partnerTokenFeesClaimed[token] += claimableAmount;
+        IERC20(token).safeTransfer(msg.sender, claimableAmount);
+
+        emit PartnerTokenFeesClaimed(token, msg.sender, claimableAmount);
     }
 
     /// @notice Sets the minimum and maximum order size limits
