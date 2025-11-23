@@ -34,23 +34,37 @@ module.exports = buildModule("GradientProtocol", (m) => {
     {}
   );
 
-  // 6. Deploy GradientOrderbook (depends on registry)
+  // 6. Deploy GradientFeeManager (depends on registry)
+  const gradientFeeManager = m.contract(
+    "GradientFeeManager",
+    [gradientRegistry],
+    {}
+  );
+
+  // 7. Deploy GradientOrderbook (depends on registry)
   const gradientOrderbook = m.contract(
     "GradientOrderbook",
     [gradientRegistry],
     {}
   );
 
-  // 7. Configure the registry with all contract addresses
+  // 8. Configure the registry with all contract addresses
   m.call(gradientRegistry, "setMainContracts", [
     gradientMarketMakerFactory, // marketMakerPool (now factory)
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
     gradientOrderbook, // orderbook
     fallbackExecutor, // fallbackExecutor
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router (mainnet)
+    gradientFeeManager, // feeManager
   ]);
 
-  // 8. Configure orderbook settings for mainnet
+  // 8.5. Update orderbook to get feeManager from registry (after registry is configured)
+  m.call(gradientOrderbook, "setGradientRegistry", [gradientRegistry]);
+
+  // 8.6. Explicitly set fee manager in orderbook
+  m.call(gradientOrderbook, "setFeeManager", [gradientFeeManager]);
+
+  // 9. Configure orderbook settings for mainnet
   // Note: Most settings are already set in constructor:
   // - ethFeePercentage = 50 (0.5%)
   // - tokenFeePercentage = 50 (0.5%)
@@ -58,22 +72,22 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // - maxOrderSize = 1000 ether
   // - maxOrderTtl = 30 days
   // - mmFeeDistributionPercentage = 7000 (70%)
-  
+
   // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-  // 9. Authorize deployer as fulfiller in registry
+  // 10. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
     deployer, // deployer address
     true // authorized
   ]);
 
-  // 10. Set orderbook as reward distributor (so it can distribute fees to MM pools)
+  // 11. Set fee manager as reward distributor (so it can distribute fees to MM pools)
   m.call(gradientRegistry, "setRewardDistributor", [
-    gradientOrderbook // orderbook address
+    gradientFeeManager // fee manager address
   ]);
 
-  // 11. Configure fallback executor for mainnet
+  // 12. Configure fallback executor for mainnet
   // Add Uniswap V2 as a DEX (mainnet addresses)
   m.call(fallbackExecutor, "addDEX", [
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router
@@ -81,7 +95,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
     1 // Priority (1 = highest)
   ]);
 
-  // 12. Create initial pool for GREY token (optional - can be done later)
+  // 13. Create initial pool for GREY token (optional - can be done later)
   // m.call(gradientMarketMakerFactory, "createPool", [GREY_TOKEN_ADDRESS]);
 
   return {
@@ -89,6 +103,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
     gradientMarketMakerFactory,
     eventAggregator,
     fallbackExecutor,
+    gradientFeeManager,
     gradientOrderbook
   };
 });

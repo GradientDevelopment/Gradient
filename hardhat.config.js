@@ -21,7 +21,7 @@ module.exports = {
     hardhat: {
       chainId: 31337
     },
-    mainnet: {      
+    mainnet: {
       url: `https://eth-mainnet.nodereal.io/v1/${process.env.NODEREAL_API_KEY}`,
       accounts: [privateKey],
       allowUnlimitedContractSize: true,
@@ -38,6 +38,16 @@ module.exports = {
     },
   },
   etherscan: {
-    apiKey: process.env.ETHERSCAN_API_KEY
+    apiKey: process.env.ETHERSCAN_API_KEY,
+    customChains: [
+      {
+        network: "bsctest",
+        chainId: 97,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=97",
+          browserURL: "https://testnet.bscscan.com"
+        }
+      }
+    ]
   },
 };

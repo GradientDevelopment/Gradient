@@ -165,11 +165,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
 
     event MinLiquidityUpdated(uint256 newMinLiquidity, bool isETH);
 
-    event PriceRangePercentageUpdated(
-        uint256 newMinPriceRangePercentage,
-        uint256 newMaxPriceRangePercentage
-    );
-
     event EmergencyWithdraw(
         address indexed token,
         address indexed recipient,
@@ -248,10 +243,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     bytes32 public merkleRoot;
     uint256 public currentVersion;
     mapping(uint256 => bytes32) public versionMerkleRoots;
-
-    // Price range variables (configurable by owner)
-    uint256 public minPriceRangePercentage = 100; // 1% minimum range
-    uint256 public maxPriceRangePercentage = 100000; // 1000% maximum range
 
     // Position limits
 
@@ -341,18 +332,9 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     function _validatePriceRange(
         uint256 minPrice,
         uint256 maxPrice
-    ) internal view {
+    ) internal pure {
         if (minPrice == 0 || maxPrice == 0) revert InvalidPriceRange();
         if (minPrice >= maxPrice) revert InvalidPriceOrder();
-
-        // Check if range is too narrow (less than 1%)
-        uint256 rangePercentage = ((maxPrice - minPrice) * 10000) / minPrice;
-        if (rangePercentage < minPriceRangePercentage)
-            revert InvalidPriceRange();
-
-        // Check if range is too wide (more than maximum percentage)
-        if (rangePercentage > maxPriceRangePercentage)
-            revert InvalidPriceRange();
     }
 
     /**
@@ -1013,24 +995,11 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             );
         }
 
-        uint256 pendingReward = (ethProviders[msg.sender].position *
-            accRewardPerShare) /
-            SCALE -
-            ethProviders[msg.sender].rewardDebt;
-        ethProviders[msg.sender].pendingRewards += pendingReward;
-
-        uint256 amountToWithdraw = (ethProviders[msg.sender].position *
-            shares) / 10000;
-        if (amountToWithdraw == 0) revert NoSharesToBurn();
-        if (amountToWithdraw > ethProviders[msg.sender].position) {
-            amountToWithdraw = ethProviders[msg.sender].position;
-        }
-        if (amountToWithdraw > totalETH) revert InsufficientPoolBalance();
-
-        ethProviders[msg.sender].position -= amountToWithdraw;
-        ethProviders[msg.sender].rewardDebt =
-            (ethProviders[msg.sender].position * accRewardPerShare) /
-            SCALE;
+        uint256 amountToWithdraw = _removeETHLiquidityInternal(
+            msg.sender,
+            shares,
+            minEthAmount
+        );
 
         // Deactivate price range only if both positions are empty
         if (
@@ -1039,15 +1008,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         ) {
             userPriceRanges[msg.sender].isActive = false;
         }
-
-        totalETH -= amountToWithdraw;
-        totalEthRemoved += amountToWithdraw;
-
-        if (amountToWithdraw < minEthAmount) revert InsufficientWithdrawal();
-        (bool success, ) = payable(msg.sender).call{value: amountToWithdraw}(
-            ""
-        );
-        if (!success) revert ETHTransferFailed();
 
         emit LiquidityWithdrawn(
             msg.sender,
@@ -1058,6 +1018,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             userPriceRanges[msg.sender].minPrice,
             userPriceRanges[msg.sender].maxPrice
         );
+
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                1, // ETH_REMOVE
+                amountToWithdraw,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
     }
 
     function removeTokenLiquidityWithProof(
@@ -1098,26 +1073,11 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             );
         }
 
-        uint256 normalizedLpShares = _normalizeTo18Decimals(
-            tokenProviders[msg.sender].position
+        uint256 amountToWithdraw = _removeTokenLiquidityInternal(
+            msg.sender,
+            shares,
+            minTokenAmount
         );
-        uint256 pendingReward = (normalizedLpShares * accTokenRewardPerShare) /
-            SCALE -
-            tokenProviders[msg.sender].rewardDebt;
-        tokenProviders[msg.sender].pendingRewards += pendingReward;
-
-        uint256 amountToWithdraw = (tokenProviders[msg.sender].position *
-            shares) / 10000;
-        if (amountToWithdraw == 0) revert NoSharesToBurn();
-        if (amountToWithdraw > tokenProviders[msg.sender].position) {
-            amountToWithdraw = tokenProviders[msg.sender].position;
-        }
-        if (amountToWithdraw > totalTokens) revert InsufficientPoolBalance();
-
-        tokenProviders[msg.sender].position -= amountToWithdraw;
-        tokenProviders[msg.sender].rewardDebt =
-            (tokenProviders[msg.sender].position * accTokenRewardPerShare) /
-            SCALE;
 
         // Deactivate price range only if both positions are empty
         if (
@@ -1126,12 +1086,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         ) {
             userPriceRanges[msg.sender].isActive = false;
         }
-
-        totalTokens -= amountToWithdraw;
-        totalTokensRemoved += amountToWithdraw;
-
-        if (amountToWithdraw < minTokenAmount) revert InsufficientWithdrawal();
-        tokenContract.safeTransfer(msg.sender, amountToWithdraw);
 
         emit LiquidityWithdrawn(
             msg.sender,
@@ -1142,6 +1096,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             userPriceRanges[msg.sender].minPrice,
             userPriceRanges[msg.sender].maxPrice
         );
+
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                3, // TOKEN_REMOVE
+                amountToWithdraw,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
     }
 
     function removeLiquidityWithProof(
@@ -1195,75 +1164,25 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 tokenAmountToWithdraw = 0;
 
         if (ethProviders[msg.sender].position > 0) {
-            uint256 ethPendingReward = (ethProviders[msg.sender].position *
-                accRewardPerShare) /
-                SCALE -
-                ethProviders[msg.sender].rewardDebt;
-            ethProviders[msg.sender].pendingRewards += ethPendingReward;
-
-            ethAmountToWithdraw =
-                (ethProviders[msg.sender].position * ethShares) /
-                10000;
-            if (ethAmountToWithdraw > ethProviders[msg.sender].position) {
-                ethAmountToWithdraw = ethProviders[msg.sender].position;
-            }
-            if (ethAmountToWithdraw > totalETH) {
-                ethAmountToWithdraw = totalETH;
-            }
-
-            ethProviders[msg.sender].position -= ethAmountToWithdraw;
-            ethProviders[msg.sender].rewardDebt =
-                (ethProviders[msg.sender].position * accRewardPerShare) /
-                SCALE;
-
-            totalETH -= ethAmountToWithdraw;
-            totalEthRemoved += ethAmountToWithdraw;
+            ethAmountToWithdraw = _removeETHLiquidityInternal(
+                msg.sender,
+                ethShares,
+                minEthAmount
+            );
         }
 
         if (tokenProviders[msg.sender].position > 0) {
-            uint256 normalizedTokenLpShares = _normalizeTo18Decimals(
-                tokenProviders[msg.sender].position
+            tokenAmountToWithdraw = _removeTokenLiquidityInternal(
+                msg.sender,
+                tokenShares,
+                minTokenAmount
             );
-            uint256 tokenPendingReward = (normalizedTokenLpShares *
-                accTokenRewardPerShare) /
-                SCALE -
-                tokenProviders[msg.sender].rewardDebt;
-            tokenProviders[msg.sender].pendingRewards += tokenPendingReward;
-
-            tokenAmountToWithdraw =
-                (tokenProviders[msg.sender].position * tokenShares) /
-                10000;
-            if (tokenAmountToWithdraw > tokenProviders[msg.sender].position) {
-                tokenAmountToWithdraw = tokenProviders[msg.sender].position;
-            }
-            if (tokenAmountToWithdraw > totalTokens) {
-                tokenAmountToWithdraw = totalTokens;
-            }
-
-            tokenProviders[msg.sender].position -= tokenAmountToWithdraw;
-            tokenProviders[msg.sender].rewardDebt =
-                (tokenProviders[msg.sender].position * accTokenRewardPerShare) /
-                SCALE;
-
-            totalTokens -= tokenAmountToWithdraw;
-            totalTokensRemoved += tokenAmountToWithdraw;
         }
 
         if (
             ethAmountToWithdraw < minEthAmount &&
             tokenAmountToWithdraw < minTokenAmount
         ) revert InsufficientWithdrawal();
-
-        if (ethAmountToWithdraw > 0) {
-            (bool success, ) = payable(msg.sender).call{
-                value: ethAmountToWithdraw
-            }("");
-            if (!success) revert ETHTransferFailed();
-        }
-
-        if (tokenAmountToWithdraw > 0) {
-            tokenContract.safeTransfer(msg.sender, tokenAmountToWithdraw);
-        }
 
         // Deactivate price range only if both positions are empty
         if (
@@ -1284,6 +1203,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
                 userPriceRanges[msg.sender].minPrice,
                 userPriceRanges[msg.sender].maxPrice
             );
+
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    1, // ETH_REMOVE
+                    ethAmountToWithdraw,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
 
         if (tokenAmountToWithdraw > 0) {
@@ -1296,6 +1230,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
                 userPriceRanges[msg.sender].minPrice,
                 userPriceRanges[msg.sender].maxPrice
             );
+
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    3, // TOKEN_REMOVE
+                    tokenAmountToWithdraw,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
     }
 
@@ -1307,7 +1256,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         if (ethAmount == 0) revert AmountZero();
         if (tokenAmount == 0) revert AmountZero();
         if (msg.value != ethAmount) revert ETHAmountMismatch();
-        if (totalTokens < tokenAmount) revert InsufficientTokenLiquidity();
+        if (totalTokens <= tokenAmount) revert InsufficientTokenLiquidity();
 
         totalTokens -= tokenAmount;
         totalTokensRemoved += tokenAmount;
@@ -1335,7 +1284,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     ) external isNotBlocked onlyOrderbook {
         if (ethAmount == 0) revert AmountZero();
         if (tokenAmount == 0) revert AmountZero();
-        if (totalETH < ethAmount) revert InsufficientETHLiquidity();
+        if (totalETH <= ethAmount) revert InsufficientETHLiquidity();
 
         tokenContract.safeTransferFrom(msg.sender, address(this), tokenAmount);
 
@@ -1459,6 +1408,87 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             address(tokenContract),
             false
         );
+    }
+
+    /**
+     * @notice Internal function to remove ETH liquidity
+     * @param user User address
+     * @param shares Percentage of shares to remove (0-10000)
+     * @param minAmount Minimum amount to withdraw
+     * @return amountToWithdraw Amount actually withdrawn
+     */
+    function _removeETHLiquidityInternal(
+        address user,
+        uint256 shares,
+        uint256 minAmount
+    ) internal returns (uint256 amountToWithdraw) {
+        uint256 pendingReward = (ethProviders[user].position *
+            accRewardPerShare) /
+            SCALE -
+            ethProviders[user].rewardDebt;
+        ethProviders[user].pendingRewards += pendingReward;
+
+        amountToWithdraw = (ethProviders[user].position * shares) / 10000;
+        if (amountToWithdraw == 0) revert NoSharesToBurn();
+        if (amountToWithdraw > ethProviders[user].position) {
+            amountToWithdraw = ethProviders[user].position;
+        }
+        if (amountToWithdraw > totalETH) revert InsufficientPoolBalance();
+
+        ethProviders[user].position -= amountToWithdraw;
+        ethProviders[user].rewardDebt =
+            (ethProviders[user].position * accRewardPerShare) /
+            SCALE;
+
+        totalETH -= amountToWithdraw;
+        totalEthRemoved += amountToWithdraw;
+
+        if (amountToWithdraw < minAmount) revert InsufficientWithdrawal();
+        (bool success, ) = payable(user).call{value: amountToWithdraw}("");
+        if (!success) revert ETHTransferFailed();
+
+        return amountToWithdraw;
+    }
+
+    /**
+     * @notice Internal function to remove token liquidity
+     * @param user User address
+     * @param shares Percentage of shares to remove (0-10000)
+     * @param minAmount Minimum amount to withdraw
+     * @return amountToWithdraw Amount actually withdrawn
+     */
+    function _removeTokenLiquidityInternal(
+        address user,
+        uint256 shares,
+        uint256 minAmount
+    ) internal returns (uint256 amountToWithdraw) {
+        uint256 normalizedLpShares = _normalizeTo18Decimals(
+            tokenProviders[user].position
+        );
+        uint256 pendingReward = (normalizedLpShares * accTokenRewardPerShare) /
+            SCALE -
+            tokenProviders[user].rewardDebt;
+        tokenProviders[user].pendingRewards += pendingReward;
+
+        amountToWithdraw = (tokenProviders[user].position * shares) / 10000;
+        if (amountToWithdraw == 0) revert NoSharesToBurn();
+        if (amountToWithdraw > tokenProviders[user].position) {
+            amountToWithdraw = tokenProviders[user].position;
+        }
+        if (amountToWithdraw > totalTokens) revert InsufficientPoolBalance();
+
+        tokenProviders[user].position -= amountToWithdraw;
+        tokenProviders[user].rewardDebt =
+            (tokenProviders[user].position * accTokenRewardPerShare) /
+            SCALE;
+
+        totalTokens -= amountToWithdraw;
+        totalTokensRemoved += amountToWithdraw;
+
+        if (amountToWithdraw < minAmount) revert InsufficientWithdrawal();
+        tokenContract.safeTransfer(user, amountToWithdraw);
+
+        return amountToWithdraw;
     }
 
     function claimRewardsWithProof(
@@ -1927,44 +1957,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             recipient,
             withdrawAmount,
             true
-        );
-    }
-
-    /**
-     * @notice Set minimum price range percentage
-     * @param _minPriceRangePercentage Minimum price range percentage (in basis points)
-     * @dev Only callable by owner
-     */
-    function setMinPriceRangePercentage(
-        uint256 _minPriceRangePercentage
-    ) external onlyOwner {
-        if (_minPriceRangePercentage == 0) revert InvalidPriceRange();
-        if (_minPriceRangePercentage >= maxPriceRangePercentage)
-            revert InvalidPriceRange();
-
-        minPriceRangePercentage = _minPriceRangePercentage;
-        emit PriceRangePercentageUpdated(
-            minPriceRangePercentage,
-            maxPriceRangePercentage
-        );
-    }
-
-    /**
-     * @notice Set maximum price range percentage
-     * @param _maxPriceRangePercentage Maximum price range percentage (in basis points)
-     * @dev Only callable by owner
-     */
-    function setMaxPriceRangePercentage(
-        uint256 _maxPriceRangePercentage
-    ) external onlyOwner {
-        if (_maxPriceRangePercentage == 0) revert InvalidPriceRange();
-        if (_maxPriceRangePercentage <= minPriceRangePercentage)
-            revert InvalidPriceRange();
-
-        maxPriceRangePercentage = _maxPriceRangePercentage;
-        emit PriceRangePercentageUpdated(
-            minPriceRangePercentage,
-            maxPriceRangePercentage
         );
     }
 

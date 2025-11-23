@@ -20,6 +20,7 @@ contract GradientRegistry is AccessControl {
     address public orderbook;
     address public fallbackExecutor;
     address public router; // Uniswap V2 Router address
+    address public feeManager; // Fee Manager contract address
 
     bool public isContractsInitialized;
 
@@ -166,6 +167,9 @@ contract GradientRegistry is AccessControl {
         } else if (nameHash == keccak256(bytes("Router"))) {
             oldAddress = router;
             router = newAddress;
+        } else if (nameHash == keccak256(bytes("FeeManager"))) {
+            oldAddress = feeManager;
+            feeManager = newAddress;
         } else {
             revert("Invalid contract name");
         }
@@ -247,6 +251,7 @@ contract GradientRegistry is AccessControl {
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
+     * @param _feeManager Address of the FeeManager contract
      * @dev This function now schedules changes instead of executing immediately
      */
     function setMainContracts(
@@ -254,7 +259,8 @@ contract GradientRegistry is AccessControl {
         address _gradientToken,
         address _orderbook,
         address _fallbackExecutor,
-        address _router
+        address _router,
+        address _feeManager
     ) external onlyRole(ADMIN_ROLE) {
         require(
             _marketMakerFactory != address(0),
@@ -267,6 +273,7 @@ contract GradientRegistry is AccessControl {
             "Invalid fallback executor address"
         );
         require(_router != address(0), "Invalid router address");
+        require(_feeManager != address(0), "Invalid fee manager address");
 
         if (!isContractsInitialized) {
             _executeContractAddressChange(
@@ -285,6 +292,8 @@ contract GradientRegistry is AccessControl {
             isInitialized["FallbackExecutor"] = true;
             _executeContractAddressChange("Router", _router);
             isInitialized["Router"] = true;
+            _executeContractAddressChange("FeeManager", _feeManager);
+            isInitialized["FeeManager"] = true;
 
             isContractsInitialized = true;
             return;
@@ -302,6 +311,7 @@ contract GradientRegistry is AccessControl {
             _fallbackExecutor
         );
         this.scheduleContractAddressChange("Router", _router);
+        this.scheduleContractAddressChange("FeeManager", _feeManager);
     }
 
     /**
@@ -366,7 +376,8 @@ contract GradientRegistry is AccessControl {
             address _gradientToken,
             address _orderbook,
             address _fallbackExecutor,
-            address _router
+            address _router,
+            address _feeManager
         )
     {
         return (
@@ -374,7 +385,8 @@ contract GradientRegistry is AccessControl {
             gradientToken,
             orderbook,
             fallbackExecutor,
-            router
+            router,
+            feeManager
         );
     }
 

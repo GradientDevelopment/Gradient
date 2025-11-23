@@ -69,14 +69,14 @@ interface IGradientFeeManager {
         uint256 totalFee,
         address token,
         address marketMakerPool
-    ) external;
+    ) external payable;
 
     // ========================== Fee Collection Functions ==========================
 
     /// @notice Collects ETH fees and updates totals
     /// @param amount Amount in ETH to collect
     /// @param token Token address for potential token-specific fee tracking
-    function collectEthFee(uint256 amount, address token) external;
+    function collectEthFee(uint256 amount, address token) external payable;
 
     /// @notice Collects token fees and updates totals
     /// @param amount Amount in tokens to collect

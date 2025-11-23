@@ -125,7 +125,7 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         uint256 totalFee,
         address token,
         address marketMakerPool
-    ) external onlyOrderbook {
+    ) external payable onlyOrderbook {
         require(totalFee > 0, "Fee amount must be greater than 0");
         require(token != address(0), "Invalid token address");
         require(marketMakerPool != address(0), "Invalid market maker pool");
@@ -179,7 +179,7 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
     function collectEthFee(
         uint256 amount,
         address /* token */
-    ) external onlyOrderbook {
+    ) external payable onlyOrderbook {
         totalEthFeesCollected += amount;
     }
 
@@ -202,6 +202,10 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         uint256 claimableAmount = totalEthFeesCollected -
             platformEthFeesClaimed;
         require(claimableAmount > 0, "No ETH fees to withdraw");
+        require(
+            address(this).balance >= claimableAmount,
+            "Insufficient contract balance"
+        );
 
         platformEthFeesClaimed += claimableAmount;
         (bool success, ) = recipient.call{value: claimableAmount}("");
@@ -222,6 +226,9 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         uint256 claimableAmount = totalTokenFeesCollected[token] -
             platformTokenFeesClaimed[token];
         require(claimableAmount > 0, "No token fees to withdraw");
+
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance >= claimableAmount, "Insufficient token balance");
 
         platformTokenFeesClaimed[token] += claimableAmount;
         IERC20(token).safeTransfer(recipient, claimableAmount);
@@ -247,6 +254,10 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         uint256 claimableAmount = partnerEthFeesCollected[token] -
             partnerEthFeesClaimed[token];
         require(claimableAmount > 0, "No partner ETH fees to claim");
+        require(
+            address(this).balance >= claimableAmount,
+            "Insufficient ETH balance"
+        );
 
         partnerEthFeesClaimed[token] += claimableAmount;
         (bool success, ) = payable(msg.sender).call{value: claimableAmount}("");
@@ -273,6 +284,9 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         uint256 claimableAmount = partnerTokenFeesCollected[token] -
             partnerTokenFeesClaimed[token];
         require(claimableAmount > 0, "No partner token fees to claim");
+
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance >= claimableAmount, "Insufficient token balance");
 
         partnerTokenFeesClaimed[token] += claimableAmount;
         IERC20(token).safeTransfer(msg.sender, claimableAmount);

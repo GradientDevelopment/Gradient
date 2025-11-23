@@ -13,13 +13,15 @@ interface IGradientRegistry {
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
+     * @param _feeManager Address of the FeeManager contract
      */
     function setMainContracts(
         address _marketMakerFactory,
         address _gradientToken,
         address _orderbook,
         address _fallbackExecutor,
-        address _router
+        address _router,
+        address _feeManager
     ) external;
 
     /**
@@ -78,6 +80,7 @@ interface IGradientRegistry {
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
      * @return _router Address of the Uniswap V2 Router contract
+     * @return _feeManager Address of the FeeManager contract
      */
     function getAllMainContracts()
         external
@@ -87,7 +90,8 @@ interface IGradientRegistry {
             address _gradientToken,
             address _orderbook,
             address _fallbackExecutor,
-            address _router
+            address _router,
+            address _feeManager
         );
 
     // View functions for individual contract addresses
@@ -109,6 +113,8 @@ interface IGradientRegistry {
     function fallbackExecutor() external view returns (address);
 
     function router() external view returns (address);
+
+    function feeManager() external view returns (address);
 
     // View functions for mappings
     function blockedTokens(address token) external view returns (bool);
