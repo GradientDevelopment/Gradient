@@ -11,6 +11,7 @@ import {IGradientMarketMakerFactory} from "./interfaces/IGradientMarketMakerFact
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
+import {IUniswapV3PriceHelper} from "./interfaces/IUniswapV3PriceHelper.sol";
 import {IEventAggregator} from "./interfaces/IEventAggregator.sol";
 import {IGradientMarketMakerPoolV3} from "./interfaces/IGradientMarketMakerPoolV3.sol";
 
@@ -97,7 +98,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 accRewardPerShare; // Accumulated rewards per share
         uint256 rewardBalance; // Available reward balance
         uint256 accountedPosition; // Accounted position for calculations
-        uint256 currentPrice; // Current market price
     }
 
     // Events
@@ -239,6 +239,9 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     // Uniswap pair address
     address public uniswapPair;
 
+    // Uniswap V3 Price Helper for accessing V3 pools
+    IUniswapV3PriceHelper public priceHelper;
+
     // Merkle root for LP share updates
     bytes32 public merkleRoot;
     uint256 public currentVersion;
@@ -350,27 +353,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 maxPrice
     ) internal pure returns (bool isWithinRange) {
         return price >= minPrice && price <= maxPrice;
-    }
-
-    /**
-     * @notice Get current market price from Uniswap
-     * @return price Current market price in wei per token
-     */
-    function _getCurrentPrice() internal view returns (uint256 price) {
-        address pairAddress = getPairAddress();
-        if (pairAddress == address(0)) revert PairDoesNotExist();
-
-        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
-            .getReserves();
-        address token0 = IUniswapV2Pair(pairAddress).token0();
-
-        if (token0 == address(tokenContract)) {
-            // Token is token0, ETH is token1
-            price = (uint256(reserve1) * 1e18) / uint256(reserve0);
-        } else {
-            // ETH is token0, Token is token1
-            price = (uint256(reserve0) * 1e18) / uint256(reserve1);
-        }
     }
 
     /**
@@ -695,9 +677,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         }
         if (uniswapPair == address(0)) revert PairDoesNotExist();
 
-        // Get current market price
-        _getCurrentPrice();
-
         // Calculate pending rewards for existing position
         if (ethProviders[user].position > 0) {
             uint256 pendingReward = (ethProviders[user].position *
@@ -801,9 +780,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         uint256 actualReceived = tokenContract.balanceOf(address(this)) -
             balanceBefore;
 
-        // Get current market price
-        _getCurrentPrice();
-
         // Calculate pending rewards for existing position
         if (tokenProviders[user].position > 0) {
             uint256 pendingReward = (tokenProviders[user].position *
@@ -879,17 +855,30 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     }
 
     /**
-     * @notice Get the Uniswap V2 pair address for this token
-     * @return pairAddress Address of the Uniswap V2 pair
+     * @notice Get the Uniswap pool/pair address for this token (checks V3 first, then V2)
+     * @return poolAddress Address of the Uniswap V3 pool or V2 pair (returns address(0) if neither exists)
+     * @dev Returns V3 pool address if available, otherwise V2 pair address
      */
-    function getPairAddress() public view returns (address pairAddress) {
+    function getPairAddress() public view returns (address poolAddress) {
         address routerAddress = getRegistry().router();
         if (routerAddress == address(0)) revert RouterNotSet();
 
         IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        address factoryAddress = router.factory();
         address weth = router.WETH();
 
+        // Try V3 first
+        if (address(priceHelper) != address(0)) {
+            address v3Pool = priceHelper.getV3PoolAddress(
+                address(tokenContract),
+                weth
+            );
+            if (v3Pool != address(0)) {
+                return v3Pool;
+            }
+        }
+
+        // Fall back to V2
+        address factoryAddress = router.factory();
         IUniswapV2Factory uniswapFactory = IUniswapV2Factory(factoryAddress);
         return uniswapFactory.getPair(address(tokenContract), weth);
     }
@@ -905,7 +894,12 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         returns (uint256 reserveETH, uint256 reserveToken)
     {
         address pairAddress = getPairAddress();
-        if (pairAddress == address(0)) revert PairDoesNotExist();
+        // For V3-only tokens, there's no V2 pair - reserves not available via V2
+        if (pairAddress == address(0)) {
+            // V3 tokens don't have V2 reserves - return zeros or revert based on your needs
+            // For now, returning zeros for V3 tokens
+            return (0, 0);
+        }
 
         (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
             .getReserves();
@@ -1865,7 +1859,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         metrics.accRewardPerShare = accRewardPerShare;
         metrics.rewardBalance = rewardBalance;
         metrics.accountedPosition = totalETH;
-        metrics.currentPrice = _getCurrentPrice();
     }
 
     /**
@@ -1882,15 +1875,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         metrics.accRewardPerShare = accTokenRewardPerShare;
         metrics.rewardBalance = tokenProviderRewardBalance;
         metrics.accountedPosition = totalTokens;
-        metrics.currentPrice = _getCurrentPrice();
-    }
-
-    /**
-     * @notice Get current market price from Uniswap
-     * @return price Current market price in wei per token
-     */
-    function getCurrentPrice() external view returns (uint256 price) {
-        return _getCurrentPrice();
     }
 
     /**
@@ -1930,6 +1914,17 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         if (_minTokenLiquidity == 0) revert InvalidMinTokenLiquidity();
         minTokenLiquidity = _minTokenLiquidity;
         emit MinLiquidityUpdated(_minTokenLiquidity, false);
+    }
+
+    /**
+     * @notice Sets the Uniswap V3 Price Helper address
+     * @param _priceHelper Address of the Uniswap V3 Price Helper
+     * @dev Only callable by owner
+     */
+    function setPriceHelper(
+        IUniswapV3PriceHelper _priceHelper
+    ) external onlyOwner {
+        priceHelper = _priceHelper;
     }
 
     /**

@@ -8,12 +8,16 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
+import {IUniswapV3SwapRouter} from "./interfaces/IUniswapV3SwapRouter.sol";
+import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
+import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
+import {IWETH9} from "./interfaces/IWETH9.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
 
 /**
  * @title FallbackExecutor
  * @notice Handles fallback execution of trades through external AMMs
- * @dev Integrates with Uniswap V2 and can be extended to support other DEXes
+ * @dev Integrates with Uniswap V2 and V3
  */
 contract FallbackExecutor is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
@@ -21,10 +25,17 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
     // Registry contract for checking blocked tokens
     IGradientRegistry public immutable gradientRegistry;
 
+    // DEX version enum
+    enum DEXVersion {
+        V2,
+        V3
+    }
+
     // DEX configurations
     struct DEXConfig {
         address router;
         address factory;
+        DEXVersion version;
         bool isActive;
         uint256 priority; // Lower number = higher priority
     }
@@ -39,7 +50,12 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
     uint256 public minLiquidityThreshold = 10 ether; // Minimum liquidity in ETH equivalent
 
     // Events
-    event DEXAdded(address indexed dex, address router, address factory);
+    event DEXAdded(
+        address indexed dex,
+        address router,
+        address factory,
+        DEXVersion version
+    );
     event DEXRemoved(address indexed dex);
     event MinLiquidityThresholdUpdated(
         uint256 oldThreshold,
@@ -67,7 +83,7 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Add a new DEX to the fallback system
+     * @notice Add a new V2 DEX to the fallback system
      * @param dex The DEX address
      * @param router The DEX's router contract
      * @param priority Priority level (lower = higher priority)
@@ -86,6 +102,7 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         dexes[dex] = DEXConfig({
             router: router,
             factory: factory,
+            version: DEXVersion.V2,
             isActive: true,
             priority: priority
         });
@@ -94,7 +111,41 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         dexIndex[dex] = activeDEXes.length - 1; // Set initial index
         _sortDEXesByPriority();
 
-        emit DEXAdded(dex, router, factory);
+        emit DEXAdded(dex, router, factory, DEXVersion.V2);
+    }
+
+    /**
+     * @notice Add a new V3 DEX to the fallback system
+     * @param dex The DEX address
+     * @param router The DEX's router contract (SwapRouter)
+     * @param factory The V3 factory address
+     * @param priority Priority level (lower = higher priority)
+     */
+    function addV3DEX(
+        address dex,
+        address router,
+        address factory,
+        uint256 priority
+    ) external onlyOwner {
+        require(activeDEXes.length < maxDEXs, "Max DEXs reached");
+        require(dex != address(0), "Invalid DEX");
+        require(router != address(0), "Invalid router");
+        require(factory != address(0), "Invalid factory");
+        require(!dexes[dex].isActive, "DEX already exists");
+
+        dexes[dex] = DEXConfig({
+            router: router,
+            factory: factory,
+            version: DEXVersion.V3,
+            isActive: true,
+            priority: priority
+        });
+
+        activeDEXes.push(dex);
+        dexIndex[dex] = activeDEXes.length - 1; // Set initial index
+        _sortDEXesByPriority();
+
+        emit DEXAdded(dex, router, factory, DEXVersion.V3);
     }
 
     /**
@@ -166,6 +217,46 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         require(bestDEX != address(0), "No suitable DEX found");
 
         DEXConfig storage dexConfig = dexes[bestDEX];
+
+        // Route to V2 or V3 based on DEX version
+        if (dexConfig.version == DEXVersion.V2) {
+            amountOut = _executeV2Trade(
+                dexConfig,
+                token,
+                amount,
+                minAmountOut,
+                isBuy
+            );
+        } else {
+            amountOut = _executeV3Trade(
+                dexConfig,
+                token,
+                amount,
+                minAmountOut,
+                isBuy
+            );
+        }
+
+        emit TradeExecuted(token, bestDEX, amount, amountOut, isBuy);
+        return amountOut;
+    }
+
+    /**
+     * @notice Execute a trade using Uniswap V2
+     * @param dexConfig The DEX configuration
+     * @param token The token to trade
+     * @param amount The amount to trade
+     * @param minAmountOut Minimum amount to receive
+     * @param isBuy Whether this is a buy or sell order
+     * @return amountOut The actual amount received from the trade
+     */
+    function _executeV2Trade(
+        DEXConfig storage dexConfig,
+        address token,
+        uint256 amount,
+        uint256 minAmountOut,
+        bool isBuy
+    ) internal returns (uint256 amountOut) {
         IUniswapV2Router02 router = IUniswapV2Router02(dexConfig.router);
 
         // Prepare path
@@ -218,9 +309,152 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
             (bool success, ) = msg.sender.call{value: amountOut}("");
             require(success, "ETH transfer failed");
         }
+    }
 
-        emit TradeExecuted(token, bestDEX, amount, amountOut, isBuy);
-        return amountOut;
+    /**
+     * @notice Execute a trade using Uniswap V3
+     * @param dexConfig The DEX configuration
+     * @param token The token to trade
+     * @param amount The amount to trade
+     * @param minAmountOut Minimum amount to receive
+     * @param isBuy Whether this is a buy or sell order
+     * @return amountOut The actual amount received from the trade
+     */
+    function _executeV3Trade(
+        DEXConfig storage dexConfig,
+        address token,
+        uint256 amount,
+        uint256 minAmountOut,
+        bool isBuy
+    ) internal returns (uint256 amountOut) {
+        IUniswapV3SwapRouter router = IUniswapV3SwapRouter(dexConfig.router);
+        IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
+
+        // Get WETH address - for V3, we need to get it from a V2 router or store it
+        // For now, we'll use a common approach: try to get it from the first V2 DEX if available
+        address weth = _getWETHAddress();
+        require(weth != address(0), "WETH address not found");
+
+        // Find the best V3 pool (try common fee tiers: 500, 3000, 10000)
+        uint24[] memory feeTiers = new uint24[](3);
+        feeTiers[0] = 500; // 0.05%
+        feeTiers[1] = 3000; // 0.3%
+        feeTiers[2] = 10000; // 1%
+
+        address poolAddress = address(0);
+        uint24 poolFee = 0;
+
+        for (uint256 i = 0; i < feeTiers.length; i++) {
+            address pool = factory.getPool(
+                token < weth ? token : weth,
+                token < weth ? weth : token,
+                feeTiers[i]
+            );
+            if (pool != address(0)) {
+                // Check if pool has liquidity
+                try IUniswapV3Pool(pool).liquidity() returns (
+                    uint128 liquidity
+                ) {
+                    if (liquidity > 0) {
+                        poolAddress = pool;
+                        poolFee = feeTiers[i];
+                        break;
+                    }
+                } catch {
+                    continue;
+                }
+            }
+        }
+
+        require(poolAddress != address(0), "No V3 pool found");
+
+        // Execute trade
+        if (isBuy) {
+            // Buy tokens with ETH
+            // Wrap ETH to WETH first, then swap
+            IWETH9(weth).deposit{value: amount}();
+            _safeApprove(weth, dexConfig.router, amount);
+
+            uint256 balanceBefore = IERC20(token).balanceOf(msg.sender);
+
+            IUniswapV3SwapRouter.ExactInputSingleParams
+                memory params = IUniswapV3SwapRouter.ExactInputSingleParams({
+                    tokenIn: weth,
+                    tokenOut: token,
+                    fee: poolFee,
+                    recipient: msg.sender,
+                    deadline: block.timestamp + MAX_DEADLINE,
+                    amountIn: amount,
+                    amountOutMinimum: minAmountOut,
+                    sqrtPriceLimitX96: 0
+                });
+
+            router.exactInputSingle(params);
+
+            uint256 balanceAfter = IERC20(token).balanceOf(msg.sender);
+            amountOut = balanceAfter - balanceBefore;
+
+            // Validate slippage protection
+            require(amountOut >= minAmountOut, "Insufficient output amount");
+        } else {
+            // Sell tokens for ETH
+            uint256 balanceBefore = address(this).balance;
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+
+            // Safe approval pattern
+            _safeApprove(token, dexConfig.router, amount);
+
+            IUniswapV3SwapRouter.ExactInputSingleParams
+                memory params = IUniswapV3SwapRouter.ExactInputSingleParams({
+                    tokenIn: token,
+                    tokenOut: weth,
+                    fee: poolFee,
+                    recipient: address(this),
+                    deadline: block.timestamp + MAX_DEADLINE,
+                    amountIn: amount,
+                    amountOutMinimum: minAmountOut,
+                    sqrtPriceLimitX96: 0
+                });
+
+            router.exactInputSingle(params);
+
+            // Unwrap WETH to ETH
+            uint256 wethBalance = IERC20(weth).balanceOf(address(this));
+            if (wethBalance > 0) {
+                IWETH9(weth).withdraw(wethBalance);
+            }
+
+            uint256 balanceAfter = address(this).balance;
+            amountOut = balanceAfter - balanceBefore;
+
+            // Validate slippage protection
+            require(amountOut >= minAmountOut, "Insufficient output amount");
+
+            // Transfer ETH to caller
+            (bool success, ) = msg.sender.call{value: amountOut}("");
+            require(success, "ETH transfer failed");
+        }
+    }
+
+    /**
+     * @notice Get WETH address from any V2 DEX or return a stored address
+     * @return weth The WETH address
+     */
+    function _getWETHAddress() internal view returns (address weth) {
+        // Try to get WETH from any V2 DEX
+        for (uint256 i = 0; i < activeDEXes.length; i++) {
+            DEXConfig storage config = dexes[activeDEXes[i]];
+            if (config.version == DEXVersion.V2 && config.isActive) {
+                try IUniswapV2Router02(config.router).WETH() returns (
+                    address wethAddr
+                ) {
+                    return wethAddr;
+                } catch {
+                    continue;
+                }
+            }
+        }
+        return address(0);
     }
 
     /**
@@ -281,6 +515,26 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         DEXConfig storage dexConfig = dexes[dex];
         if (!dexConfig.isActive) return false;
 
+        if (dexConfig.version == DEXVersion.V2) {
+            return _isV2DEXSuitable(dexConfig, token, amount, isBuy);
+        } else {
+            return _isV3DEXSuitable(dexConfig, token, amount, isBuy);
+        }
+    }
+
+    /**
+     * @notice Check if a V2 DEX is suitable for a trade
+     * @param dexConfig The DEX configuration
+     * @param token The token to trade
+     * @param amount The amount to trade
+     * @param isBuy Whether this is a buy or sell order
+     */
+    function _isV2DEXSuitable(
+        DEXConfig storage dexConfig,
+        address token,
+        uint256 amount,
+        bool isBuy
+    ) internal view returns (bool) {
         // Get WETH address from router
         IUniswapV2Router02 router = IUniswapV2Router02(dexConfig.router);
         address weth = router.WETH();
@@ -309,6 +563,69 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
         } else {
             return tokenReserve >= (amount * 11) / 10; // 10% safety margin
         }
+    }
+
+    /**
+     * @notice Check if a V3 DEX is suitable for a trade
+     * @param dexConfig The DEX configuration
+     * @param token The token to trade
+     */
+    function _isV3DEXSuitable(
+        DEXConfig storage dexConfig,
+        address token,
+        uint256 /* amount */,
+        bool /* isBuy */
+    ) internal view returns (bool) {
+        // Get WETH address
+        address weth = _getWETHAddress();
+        if (weth == address(0)) return false;
+
+        IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
+
+        // Try common fee tiers: 500, 3000, 10000
+        uint24[] memory feeTiers = new uint24[](3);
+        feeTiers[0] = 500; // 0.05%
+        feeTiers[1] = 3000; // 0.3%
+        feeTiers[2] = 10000; // 1%
+
+        for (uint256 i = 0; i < feeTiers.length; i++) {
+            address pool = factory.getPool(
+                token < weth ? token : weth,
+                token < weth ? weth : token,
+                feeTiers[i]
+            );
+            if (pool != address(0)) {
+                // Check if pool has liquidity and valid price
+                try IUniswapV3Pool(pool).slot0() returns (
+                    uint160 sqrtPriceX96,
+                    int24,
+                    uint16,
+                    uint16,
+                    uint16,
+                    uint8,
+                    bool
+                ) {
+                    if (sqrtPriceX96 > 0) {
+                        // Check liquidity
+                        try IUniswapV3Pool(pool).liquidity() returns (
+                            uint128 liquidity
+                        ) {
+                            if (liquidity > 0) {
+                                // For V3, we check if there's sufficient liquidity
+                                // The liquidity check is more complex in V3, but we can at least verify the pool exists and has liquidity
+                                return true;
+                            }
+                        } catch {
+                            continue;
+                        }
+                    }
+                } catch {
+                    continue;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

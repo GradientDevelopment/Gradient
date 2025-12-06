@@ -41,14 +41,21 @@ module.exports = buildModule("GradientProtocol", (m) => {
     {}
   );
 
-  // 7. Deploy GradientOrderbook (depends on registry)
+  // 7. Deploy UniswapV3PriceHelper (needed for V3 price support)
+  const uniswapV3PriceHelper = m.contract(
+    "UniswapV3PriceHelper",
+    [ROUTER_ADDRESSES.mainnet.uniswapV3Factory], // Uniswap V3 Factory address
+    {}
+  );
+
+  // 8. Deploy GradientOrderbook (depends on registry)
   const gradientOrderbook = m.contract(
     "GradientOrderbook",
     [gradientRegistry],
     {}
   );
 
-  // 8. Configure the registry with all contract addresses
+  // 9. Configure the registry with all contract addresses
   m.call(gradientRegistry, "setMainContracts", [
     gradientMarketMakerFactory, // marketMakerPool (now factory)
     GREY_TOKEN_ADDRESS, // gradientToken (placeholder)
@@ -58,13 +65,17 @@ module.exports = buildModule("GradientProtocol", (m) => {
     gradientFeeManager, // feeManager
   ]);
 
-  // 8.5. Update orderbook to get feeManager from registry (after registry is configured)
+  // 9.5. Update orderbook to get feeManager from registry (after registry is configured)
   m.call(gradientOrderbook, "setGradientRegistry", [gradientRegistry]);
 
-  // 8.6. Explicitly set fee manager in orderbook
+  // 9.6. Explicitly set fee manager in orderbook
   m.call(gradientOrderbook, "setFeeManager", [gradientFeeManager]);
 
-  // 9. Configure orderbook settings for mainnet
+  // 9.7. Set Uniswap V3 Factory in orderbook (if it uses V3)
+  // Note: Orderbook may have its own V3 factory setting, check if needed
+  // m.call(gradientOrderbook, "setUniswapV3Factory", [ROUTER_ADDRESSES.mainnet.uniswapV3Factory]);
+
+  // 10. Configure orderbook settings for mainnet
   // Note: Most settings are already set in constructor:
   // - ethFeePercentage = 50 (0.5%)
   // - tokenFeePercentage = 50 (0.5%)
@@ -76,26 +87,36 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-  // 10. Authorize deployer as fulfiller in registry
+  // 11. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
     deployer, // deployer address
     true // authorized
   ]);
 
-  // 11. Set fee manager as reward distributor (so it can distribute fees to MM pools)
+  // 12. Set fee manager as reward distributor (so it can distribute fees to MM pools)
   m.call(gradientRegistry, "setRewardDistributor", [
     gradientFeeManager // fee manager address
   ]);
 
-  // 12. Configure fallback executor for mainnet
+  // 13. Configure fallback executor for mainnet
   // Add Uniswap V2 as a DEX (mainnet addresses)
   m.call(fallbackExecutor, "addDEX", [
-    ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Uniswap V2 Router
+    ROUTER_ADDRESSES.mainnet.uniswapV2Router, // DEX identifier (using router address)
     ROUTER_ADDRESSES.mainnet.uniswapV2Router, // Router address
     1 // Priority (1 = highest)
   ]);
 
-  // 13. Create initial pool for GREY token (optional - can be done later)
+  // 13.5. Add Uniswap V3 as a DEX (mainnet addresses)
+  m.call(fallbackExecutor, "addV3DEX", [
+    ROUTER_ADDRESSES.mainnet.uniswapV3Router, // DEX identifier (using router address)
+    ROUTER_ADDRESSES.mainnet.uniswapV3Router, // SwapRouter address
+    ROUTER_ADDRESSES.mainnet.uniswapV3Factory, // V3 Factory address
+    2 // Priority (2 = second priority, after V2)
+  ]);
+
+  // 14. Create initial pool for GREY token (optional - can be done later)
+  // Note: After creating a pool, you'll need to set the priceHelper on that pool:
+  // m.call(poolAddress, "setPriceHelper", [uniswapV3PriceHelper]);
   // m.call(gradientMarketMakerFactory, "createPool", [GREY_TOKEN_ADDRESS]);
 
   return {
@@ -104,6 +125,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
     eventAggregator,
     fallbackExecutor,
     gradientFeeManager,
-    gradientOrderbook
+    gradientOrderbook,
+    uniswapV3PriceHelper
   };
 });
