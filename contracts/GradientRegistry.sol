@@ -15,11 +15,12 @@ contract GradientRegistry is AccessControl {
     bytes32 public constant TIMELOCK_ROLE = keccak256("TIMELOCK_ROLE");
 
     // Contract addresses
-    address public marketMakerPool;
+    address public marketMakerFactory;
     address public gradientToken;
     address public orderbook;
     address public fallbackExecutor;
     address public router; // Uniswap V2 Router address
+    address public feeManager; // Fee Manager contract address
 
     bool public isContractsInitialized;
 
@@ -35,6 +36,10 @@ contract GradientRegistry is AccessControl {
 
     // Mapping for authorized fulfillers
     mapping(address => bool) public authorizedFulfillers;
+
+    // Partner token management (for market maker fee splits)
+    mapping(address => address) public partnerTokenWallets;
+    mapping(address => bool) public isPartnerToken;
 
     // Events
     event ContractAddressUpdated(
@@ -54,6 +59,8 @@ contract GradientRegistry is AccessControl {
     event RegistryChangeExecuted(bytes32 indexed changeId);
     event RegistryChangeCancelled(bytes32 indexed changeId);
     event TimelockDurationUpdated(uint256 oldDuration, uint256 newDuration);
+    event PartnerTokenSet(address indexed token, address indexed partnerWallet);
+    event PartnerTokenRemoved(address indexed token);
 
     constructor() {
         // Set up roles
@@ -145,9 +152,9 @@ contract GradientRegistry is AccessControl {
         bytes32 nameHash = keccak256(bytes(contractName));
         address oldAddress;
 
-        if (nameHash == keccak256(bytes("MarketMakerPool"))) {
-            oldAddress = marketMakerPool;
-            marketMakerPool = newAddress;
+        if (nameHash == keccak256(bytes("MarketMakerFactory"))) {
+            oldAddress = marketMakerFactory;
+            marketMakerFactory = newAddress;
         } else if (nameHash == keccak256(bytes("GradientToken"))) {
             oldAddress = gradientToken;
             gradientToken = newAddress;
@@ -160,6 +167,9 @@ contract GradientRegistry is AccessControl {
         } else if (nameHash == keccak256(bytes("Router"))) {
             oldAddress = router;
             router = newAddress;
+        } else if (nameHash == keccak256(bytes("FeeManager"))) {
+            oldAddress = feeManager;
+            feeManager = newAddress;
         } else {
             revert("Invalid contract name");
         }
@@ -236,23 +246,25 @@ contract GradientRegistry is AccessControl {
 
     /**
      * @notice Set the main contract addresses (legacy function, requires timelock)
-     * @param _marketMakerPool Address of the MarketMakerPool contract
+     * @param _marketMakerFactory Address of the MarketMakerFactory contract
      * @param _gradientToken Address of the Gradient token contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
+     * @param _feeManager Address of the FeeManager contract
      * @dev This function now schedules changes instead of executing immediately
      */
     function setMainContracts(
-        address _marketMakerPool,
+        address _marketMakerFactory,
         address _gradientToken,
         address _orderbook,
         address _fallbackExecutor,
-        address _router
+        address _router,
+        address _feeManager
     ) external onlyRole(ADMIN_ROLE) {
         require(
-            _marketMakerPool != address(0),
-            "Invalid market maker pool address"
+            _marketMakerFactory != address(0),
+            "Invalid market maker factory address"
         );
         require(_gradientToken != address(0), "Invalid gradient token address");
         require(_orderbook != address(0), "Invalid orderbook address");
@@ -261,10 +273,14 @@ contract GradientRegistry is AccessControl {
             "Invalid fallback executor address"
         );
         require(_router != address(0), "Invalid router address");
+        require(_feeManager != address(0), "Invalid fee manager address");
 
         if (!isContractsInitialized) {
-            _executeContractAddressChange("MarketMakerPool", _marketMakerPool);
-            isInitialized["MarketMakerPool"] = true;
+            _executeContractAddressChange(
+                "MarketMakerFactory",
+                _marketMakerFactory
+            );
+            isInitialized["MarketMakerFactory"] = true;
             _executeContractAddressChange("GradientToken", _gradientToken);
             isInitialized["GradientToken"] = true;
             _executeContractAddressChange("Orderbook", _orderbook);
@@ -276,13 +292,18 @@ contract GradientRegistry is AccessControl {
             isInitialized["FallbackExecutor"] = true;
             _executeContractAddressChange("Router", _router);
             isInitialized["Router"] = true;
+            _executeContractAddressChange("FeeManager", _feeManager);
+            isInitialized["FeeManager"] = true;
 
             isContractsInitialized = true;
             return;
         }
 
         // Set each contract address (first-time setup will be immediate)
-        this.scheduleContractAddressChange("MarketMakerPool", _marketMakerPool);
+        this.scheduleContractAddressChange(
+            "MarketMakerFactory",
+            _marketMakerFactory
+        );
         this.scheduleContractAddressChange("GradientToken", _gradientToken);
         this.scheduleContractAddressChange("Orderbook", _orderbook);
         this.scheduleContractAddressChange(
@@ -290,6 +311,7 @@ contract GradientRegistry is AccessControl {
             _fallbackExecutor
         );
         this.scheduleContractAddressChange("Router", _router);
+        this.scheduleContractAddressChange("FeeManager", _feeManager);
     }
 
     /**
@@ -340,7 +362,7 @@ contract GradientRegistry is AccessControl {
 
     /**
      * @notice Get all main contract addresses
-     * @return _marketMakerPool Address of the MarketMakerPool contract
+     * @return _marketMakerFactory Address of the MarketMakerFactory contract
      * @return _gradientToken Address of the Gradient token contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
@@ -350,20 +372,30 @@ contract GradientRegistry is AccessControl {
         external
         view
         returns (
-            address _marketMakerPool,
+            address _marketMakerFactory,
             address _gradientToken,
             address _orderbook,
             address _fallbackExecutor,
-            address _router
+            address _router,
+            address _feeManager
         )
     {
         return (
-            marketMakerPool,
+            marketMakerFactory,
             gradientToken,
             orderbook,
             fallbackExecutor,
-            router
+            router,
+            feeManager
         );
+    }
+
+    /**
+     * @notice Get the market maker factory contract address
+     * @return address The market maker factory contract address
+     */
+    function getMarketMakerFactory() external view returns (address) {
+        return marketMakerFactory;
     }
 
     /**
@@ -449,5 +481,60 @@ contract GradientRegistry is AccessControl {
         address account
     ) public override onlyRole(DEFAULT_ADMIN_ROLE) {
         super.renounceRole(role, account);
+    }
+
+    // ========================== Partner Token Management (Market Maker Fee Splits) ==========================
+
+    /**
+     * @notice Set a token as a partner token with its designated wallet
+     * @param token The address of the token to set as partner
+     * @param partnerWallet The wallet address for the partner team
+     * @dev Only callable by ADMIN_ROLE
+     */
+    function setPartnerToken(
+        address token,
+        address partnerWallet
+    ) external onlyRole(ADMIN_ROLE) {
+        require(token != address(0), "Invalid token address");
+        require(partnerWallet != address(0), "Invalid partner wallet address");
+        require(!isPartnerToken[token], "Token is already a partner token");
+
+        isPartnerToken[token] = true;
+        partnerTokenWallets[token] = partnerWallet;
+
+        emit PartnerTokenSet(token, partnerWallet);
+    }
+
+    /**
+     * @notice Remove a token from partner tokens
+     * @param token The address of the token to remove from partners
+     * @dev Only callable by ADMIN_ROLE
+     */
+    function removePartnerToken(address token) external onlyRole(ADMIN_ROLE) {
+        require(token != address(0), "Invalid token address");
+        require(isPartnerToken[token], "Token is not a partner token");
+
+        isPartnerToken[token] = false;
+        partnerTokenWallets[token] = address(0);
+
+        emit PartnerTokenRemoved(token);
+    }
+
+    /**
+     * @notice Check if a token is a partner token
+     * @param token The address of the token to check
+     * @return bool Whether the token is a partner token
+     */
+    function checkIsPartnerToken(address token) external view returns (bool) {
+        return isPartnerToken[token];
+    }
+
+    /**
+     * @notice Get the partner wallet for a token
+     * @param token The address of the token
+     * @return address The partner wallet address (address(0) if not partner)
+     */
+    function getPartnerWallet(address token) external view returns (address) {
+        return partnerTokenWallets[token];
     }
 }

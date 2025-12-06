@@ -7,19 +7,21 @@ pragma solidity ^0.8.20;
  */
 interface IGradientRegistry {
     /**
-     * @notice Set the main contract addresses
-     * @param _marketMakerPool Address of the MarketMakerPool contract
+     * @notice Set all main contract addresses at once
+     * @param _marketMakerFactory Address of the MarketMakerFactory contract
      * @param _gradientToken Address of the Gradient token contract
      * @param _orderbook Address of the Orderbook contract
      * @param _fallbackExecutor Address of the FallbackExecutor contract
      * @param _router Address of the Uniswap V2 Router contract
+     * @param _feeManager Address of the FeeManager contract
      */
     function setMainContracts(
-        address _marketMakerPool,
+        address _marketMakerFactory,
         address _gradientToken,
         address _orderbook,
         address _fallbackExecutor,
-        address _router
+        address _router,
+        address _feeManager
     ) external;
 
     /**
@@ -73,25 +75,36 @@ interface IGradientRegistry {
 
     /**
      * @notice Get all main contract addresses
-     * @return _marketMakerPool Address of the MarketMakerPool contract
+     * @return _marketMakerFactory Address of the MarketMakerFactory contract
      * @return _gradientToken Address of the Gradient token contract
      * @return _orderbook Address of the Orderbook contract
      * @return _fallbackExecutor Address of the FallbackExecutor contract
      * @return _router Address of the Uniswap V2 Router contract
+     * @return _feeManager Address of the FeeManager contract
      */
     function getAllMainContracts()
         external
         view
         returns (
-            address _marketMakerPool,
+            address _marketMakerFactory,
             address _gradientToken,
             address _orderbook,
             address _fallbackExecutor,
-            address _router
+            address _router,
+            address _feeManager
         );
 
     // View functions for individual contract addresses
+    function marketMakerFactory() external view returns (address);
+
+    // Legacy function for backward compatibility (returns factory address)
     function marketMakerPool() external view returns (address);
+
+    // New function to get pool for specific token
+    function getMarketMakerPool(address token) external view returns (address);
+
+    // New function to check if pool exists for token
+    function poolExists(address token) external view returns (bool);
 
     function gradientToken() external view returns (address);
 
@@ -100,6 +113,8 @@ interface IGradientRegistry {
     function fallbackExecutor() external view returns (address);
 
     function router() external view returns (address);
+
+    function feeManager() external view returns (address);
 
     // View functions for mappings
     function blockedTokens(address token) external view returns (bool);
@@ -111,4 +126,13 @@ interface IGradientRegistry {
     function authorizedFulfillers(
         address fulfiller
     ) external view returns (bool);
+
+    // Partner token management functions (for market maker fee splits)
+    function setPartnerToken(address token, address partnerWallet) external;
+
+    function removePartnerToken(address token) external;
+
+    function checkIsPartnerToken(address token) external view returns (bool);
+
+    function getPartnerWallet(address token) external view returns (address);
 }

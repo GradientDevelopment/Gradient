@@ -16,7 +16,7 @@ A decentralized orderbook smart contract for trading ERC20 tokens against ETH. T
 
 ## System Flow Diagram
 
-This diagram illustrates the primary user flows and contract interactions within the Gradient protocol.
+This diagram illustrates the primary user flows and contract interactions within the Gradient protocol (V3 architecture).
 
 ```
                                      +--------------------+
@@ -26,8 +26,15 @@ This diagram illustrates the primary user flows and contract interactions within
                                    (Adds/Removes Liquidity)
                                                 |
                                                 v
+                                     +---------------------------+
+                                     | GradientMarketMakerFactory|
+                                     +----------+----------------+
+                                                |
+                                    (Creates/Manages)
+                                                |
+                                                v
 +----------+      +-----------+      +-------------------------------------------+
-|  Trader  |      | Fulfiller |      |         GradientMarketMakerPool         |
+|  Trader  |      | Fulfiller |      |    GradientMarketMakerPoolV3 (per token)  |
 +----+-----+      +-----+-----+      +--------------------+--------------------+
      |                  |                                  ^
 (Create/Cancel/AMM)     | (Executes Matches)               | (Fulfill from Pool)
@@ -36,14 +43,22 @@ This diagram illustrates the primary user flows and contract interactions within
 +--------------------------------------------------------------------+
 |                          GradientOrderbook                         |
 +--------------------------------------------------------------------+
-     |         ^
-     |         | (AMM Self-Fulfill)
-     |         |
-     v         +
-+----------+
-| External |
-|   AMM    |
-+----------+
+     |         ^                    |
+     |         | (AMM Self-Fulfill) | (Fee Collection)
+     |         |                    |
+     v         +                    v
++----------+              +---------------------------+
+| External |              |    GradientFeeManager     |
+|   AMM    |              +---------------------------+
++----------+                        |
+                                    | (Fee Distribution)
+                                    |
+                    +---------------+---------------+
+                    |                               |
+                    v                               v
+     +---------------------------+      +---------------------------+
+     | Market Maker Pool (50%)  |      | Platform/Partner (50%)    |
+     +---------------------------+      +---------------------------+
 ```
 
 Note: All core contracts use the GradientRegistry for service discovery (not shown for clarity).
@@ -52,31 +67,85 @@ Note: All core contracts use the GradientRegistry for service discovery (not sho
 
 The protocol is composed of several key smart contracts that work together to create a robust and decentralized trading environment.
 
+### Contract Structure
+
+The protocol has evolved from a single pool contract to a more modular architecture:
+
+**Previous Structure:**
+- `interfaces/` - Protocol interfaces
+- `libs/` - Shared libraries
+- `test/` - Test contracts and mocks
+- `FallbackExecutor.sol` - External AMM integration
+- `GradientMarketMakerPool.sol` - Single pool contract managing all tokens
+- `GradientOrderbook.sol` - Main orderbook contract
+- `GradientRegistry.sol` - Central registry
+- Fee management integrated within the orderbook
+
+**Current Structure (V3):**
+- `interfaces/` - Protocol interfaces (including new V3 interfaces)
+- `libs/` - Shared libraries
+- `test/` - Test contracts and mocks
+- `FallbackExecutor.sol` - External AMM integration
+- `GradientMarketMakerPool.sol` - Legacy pool contract (maintained for backward compatibility)
+- `GradientMarketMakerPoolV3.sol` - Individual pool contracts (one per token)
+- `GradientMarketMakerFactory.sol` - Factory contract for deploying separate pool instances
+- `GradientFeeManager.sol` - Dedicated contract for managing partner fees and platform fees
+- `GradientOrderbook.sol` - Main orderbook contract (updated to work with V3 architecture)
+- `GradientRegistry.sol` - Central registry for contract addresses
+
+**Key Improvements in V3:**
+1. **Separate Pool Contracts**: Each token now has its own dedicated pool contract, providing better isolation and gas efficiency.
+2. **Factory Pattern**: The factory contract manages pool creation and discovery, similar to Uniswap's factory pattern.
+3. **Dedicated Fee Manager**: Fee collection, distribution, and withdrawal logic is now separated into `GradientFeeManager`, providing better security and enabling partner fee management.
+4. **Partner Fee Support**: The fee manager can split fees between the platform and partner teams for designated partner tokens.
+
 ### `GradientRegistry.sol`
 
-*   **Purpose:** This contract serves as the central nervous system of the protocol. It is an on-chain registry that holds the addresses of all other core contracts (e.g., `GradientOrderbook`, `GradientMarketMakerPool`).
+*   **Purpose:** This contract serves as the central nervous system of the protocol. It is an on-chain registry that holds the addresses of all other core contracts (e.g., `GradientOrderbook`, `GradientMarketMakerFactory`, `GradientFeeManager`).
 *   **Key Features:**
     *   **Upgradability:** By allowing the owner to update contract addresses, the registry enables seamless upgrades to different components of the protocol without requiring a full migration.
     *   **Access Control:** It maintains a list of authorized contracts, ensuring that critical functions can only be called by other trusted parts of the system.
-    *   **System Configuration:** It stores system-wide settings, such as lists of blocked tokens and authorized reward distributors.
+    *   **System Configuration:** It stores system-wide settings, such as lists of blocked tokens, partner tokens, and authorized reward distributors.
 
 ### `GradientOrderbook.sol`
 
 *   **Purpose:** This is the main user-facing contract that implements the decentralized exchange logic. It manages the entire lifecycle of trade orders.
 *   **Key Features:**
-    *   **Hybrid Order Fulfillment:** It uniquely supports both peer-to-peer (P2P) order matching and integration with a market maker pool for liquidity.
+    *   **Hybrid Order Fulfillment:** It uniquely supports both peer-to-peer (P2P) order matching and integration with market maker pools for liquidity.
     *   **Order Management:** Handles the creation, cancellation, and status tracking of limit and market orders.
     *   **Asset Handling:** Securely locks and transfers ETH and ERC20 tokens upon trade settlement.
     *   **AMM Fallback:** Includes a `fulfillOwnOrderWithAMM` function, allowing users to unlock their assets to execute a trade on an external AMM.
+    *   **Factory Integration:** Uses `GradientMarketMakerFactory` to locate or create token-specific pool contracts.
+    *   **Fee Management:** Delegates fee collection and distribution to `GradientFeeManager`.
 
-### `GradientMarketMakerPool.sol`
+### `GradientMarketMakerFactory.sol`
 
-*   **Purpose:** This contract functions as the protocol's dedicated liquidity provider. It allows liquidity providers (LPs) to deposit assets (ETH and ERC20 tokens) and earn passive income from trading fees.
+*   **Purpose:** Factory contract that deploys and manages individual `GradientMarketMakerPoolV3` contracts for each token. Similar to Uniswap V2 Factory pattern - one pool per token.
 *   **Key Features:**
-    *   **Liquidity Pools:** Maintains individual liquidity pools for different ERC20 tokens.
-    *   **LP Rewards:** Collects a share of trading fees from the `GradientOrderbook` and distributes them as rewards to LPs, proportional to their stake in the pool.
+    *   **Pool Creation:** Deploys new pool contracts using CREATE2 for deterministic addresses.
+    *   **Pool Registry:** Maintains a mapping of token addresses to their corresponding pool contracts.
+    *   **Liquidity Provision:** Provides convenience functions for adding initial liquidity when creating a new pool.
+    *   **Pool Discovery:** Allows querying pool addresses by token address.
+
+### `GradientMarketMakerPoolV3.sol`
+
+*   **Purpose:** Individual pool contract for a specific ERC20 token. Each token has its own dedicated pool contract, allowing for better isolation and gas efficiency.
+*   **Key Features:**
+    *   **Token-Specific Pools:** Each pool manages liquidity for a single ERC20 token paired with ETH.
+    *   **LP Rewards:** Collects trading fees and distributes them as rewards to LPs, proportional to their stake in the pool.
     *   **Order Fulfillment:** Interacts directly with the `GradientOrderbook` to provide the necessary assets to fill trades that cannot be matched P2P.
-    *   **Ratio Management:** Relies on a Uniswap V2 pair to enforce a fair 50/50 deposit ratio for liquidity provision.
+    *   **Fee Distribution:** Receives fees from `GradientFeeManager` and distributes them proportionally to liquidity providers.
+    *   **Ratio Management:** Enforces fair 50/50 deposit ratios for liquidity provision.
+
+### `GradientFeeManager.sol`
+
+*   **Purpose:** Centralized contract for managing all fee collection, distribution, and withdrawal. Separates fee logic from the main orderbook for better security and maintainability.
+*   **Key Features:**
+    *   **Fee Collection:** Collects trading fees from the orderbook (both ETH and token fees).
+    *   **Partner Fee Management:** Tracks and manages fees for partner tokens, splitting fees between the GRAY team and partner teams.
+    *   **Platform Fee Management:** Accumulates platform fees for later withdrawal by the owner.
+    *   **Fee Distribution:** Automatically distributes 50% of fees to market maker pools and 50% to teams (with partner splits when applicable).
+    *   **Withdrawal Functions:** Provides separate functions for platform owners and partner teams to claim their accumulated fees.
 
 ### `FallbackExecutor.sol`
 
@@ -93,11 +162,15 @@ The protocol uses a set of interfaces to define the contract functions and ensur
 
 ### Core Protocol Interfaces
 *   **`IGradientRegistry.sol`**: Defines the functions exposed by the `GradientRegistry` contract. It allows other contracts to securely query for the official addresses of core protocol components.
-*   **`IGradientMarketMakerPool.sol`**: Defines the external functions for the `GradientMarketMakerPool`. This includes functions for depositing and withdrawing liquidity, claiming rewards, and, crucially, functions called by the `GradientOrderbook` to transfer assets when filling an order (`transferTokenToOrderbook`, `receiveETHFromOrderbook`, etc.).
+*   **`IGradientMarketMakerPoolV3.sol`**: Defines the external functions for the `GradientMarketMakerPoolV3` contracts. This includes functions for depositing and withdrawing liquidity, claiming rewards, executing orders, and receiving fee distributions from the fee manager.
+*   **`IGradientMarketMakerFactory.sol`**: Defines the interface for the factory contract, including pool creation, pool lookup, and pool validation functions.
+*   **`IGradientFeeManager.sol`**: Defines the interface for fee collection, distribution, and withdrawal functions. Handles both partner fees and platform fees.
+*   **`IGradientMarketMakerPool.sol`**: Legacy interface for the original `GradientMarketMakerPool` (V1). Maintained for backward compatibility.
 *   **`IFallbackExecutor.sol`**: Defines the standard functions for the `FallbackExecutor` contract, ensuring that any contract wanting to use it for swaps knows how to call it.
 
 ### External Protocol Interfaces
-*   **`IUniswapV2Router.sol`**, **`IUniswapV2Factory.sol`**, **`IUniswapV2Pair.sol`**: These are standard, well-known interfaces for interacting with the Uniswap V2 ecosystem. They are used by the `GradientMarketMakerPool` to check token reserves for liquidity deposits and by the `fulfillOwnOrderWithAMM` function in the `GradientOrderbook` to perform swaps.
+*   **`IUniswapV2Router.sol`**, **`IUniswapV2Factory.sol`**, **`IUniswapV2Pair.sol`**: These are standard, well-known interfaces for interacting with the Uniswap V2 ecosystem. They are used for checking token reserves and performing swaps.
+*   **`IUniswapV3Pool.sol`**, **`IUniswapV3Factory.sol`**, **`IUniswapV3SwapRouter.sol`**: Interfaces for interacting with the Uniswap V3 ecosystem, used for price discovery and external liquidity sourcing.
 
 ## Contract Overview
 
@@ -135,11 +208,11 @@ The Orderbook contract provides the following key functionalities:
 #### For Admin
 - `setFulfillerStatus`: Whitelist or unwhitelist order fulfillers.
 - `setFeePercentage`: Update the trading fee percentage.
-- `updateMMFeeDistributionPercentage`: Set the percentage of fees distributed to the MM pool.
-- `withdrawFees`: Withdraw the platform's share of collected fees.
 - `setOrderSizeLimits`: Update minimum and maximum order sizes.
 - `setMaxOrderTtl`: Update maximum order time-to-live.
 - `emergencyWithdraw`: Emergency withdrawal of stuck tokens or ETH.
+
+**Note:** Fee collection, distribution, and withdrawal are now handled by the `GradientFeeManager` contract. Platform fees and partner fees can be withdrawn through the fee manager's dedicated functions.
 
 ### Order Limits
 - Minimum order size: 0.000001 ETH (1e6 wei)
@@ -218,7 +291,12 @@ The contract emits the following events:
 ## Dependencies
 
 - OpenZeppelin Contracts
-- Gradient Protocol Interfaces (`IGradientRegistry`, `IGradientMarketMakerPool`)
+- Gradient Protocol Interfaces:
+  - `IGradientRegistry`
+  - `IGradientMarketMakerPoolV3`
+  - `IGradientMarketMakerFactory`
+  - `IGradientFeeManager`
+  - `IGradientMarketMakerPool` (legacy)
 
 ## Development
 
