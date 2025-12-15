@@ -1,0 +1,7 @@
+{
+  "GradientProtocol#GradientRegistry": "0xd2cC9718e98a9d9C66dBcc92F5D06fC1678A3979",
+  "GradientProtocol#FallbackExecutor": "0x699c3110377D5E5798192583FFB819eE40c6D1b2",
+  "GradientProtocol#GradientMarketMakerFactory": "0x1F9fd00e0A3C8935ff0322339ecA5B80719d901f",
+  "GradientProtocol#GradientOrderbook": "0xB2DCcA5683b13468c413fD0A5D5C06D3e77812dE",
+  "GradientProtocol#EventAggregator": "0x0a31f971c2d480eb13b578755757CA98EB17dAC2"
+}

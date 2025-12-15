@@ -292,7 +292,7 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             revert UnsupportedTokenDecimals();
         }
 
-        minLiquidity = 1e15; // 0.001 ETH minimum (default)
+        minLiquidity = 1000000000000; // 0.000001 ETH minimum (default)
         minTokenLiquidity = 2 * (10 ** tokenDecimals); // Set minimum token liquidity to 2 tokens
     }
 

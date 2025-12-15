@@ -70,6 +70,16 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
     // Override maxOrderTtl to 7 days for testnet (shorter than default 30 days)
     m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
+    // 10.5. Set Uniswap V3 Factory address in orderbook
+    m.call(gradientOrderbook, "setUniswapV3Factory", [
+        ROUTER_ADDRESSES.bsctest.uniswapV3Factory
+    ]);
+
+    // 10.6. Set Uniswap V3 Price Helper in orderbook
+    m.call(gradientOrderbook, "setUniswapV3PriceHelper", [
+        uniswapV3PriceHelper
+    ]);
+
     // 11. Authorize deployer as fulfiller in registry
     m.call(gradientRegistry, "authorizeFulfiller", [
         deployer, // deployer address

@@ -211,4 +211,96 @@ contract UniswapV3PriceHelper is IUniswapV3PriceHelper, Ownable {
             price = (uint256(reserve0) * 1e18) / uint256(reserve1);
         }
     }
+
+    /**
+     * @notice Get amount out for a swap in Uniswap V3 (similar to V2's getAmountOut)
+     * @param amountIn Amount of input token
+     * @param tokenIn Address of the input token
+     * @param tokenOut Address of the output token
+     * @return amountOut Amount of output token that would be received
+     * @dev Returns 0 if pool doesn't exist or calculation fails
+     * @dev This is a simplified calculation based on current price. For large amounts,
+     *      price impact may be significant due to concentrated liquidity.
+     */
+    function getAmountOut(
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut
+    ) external view override returns (uint256 amountOut) {
+        if (amountIn == 0) return 0;
+        if (tokenIn == address(0) || tokenOut == address(0)) return 0;
+        if (tokenIn == tokenOut) return amountIn;
+
+        // Find V3 pool by trying different fee tiers
+        address poolAddress = address(0);
+
+        address token0 = tokenIn < tokenOut ? tokenIn : tokenOut;
+        address token1 = tokenIn < tokenOut ? tokenOut : tokenIn;
+
+        for (uint256 i = 0; i < v3FeeTiers.length; i++) {
+            address pool = IUniswapV3Factory(uniswapV3Factory).getPool(
+                token0,
+                token1,
+                uint24(v3FeeTiers[i])
+            );
+
+            if (pool != address(0)) {
+                // Check if pool has valid price data
+                try IUniswapV3Pool(pool).slot0() returns (
+                    uint160 sqrtPrice,
+                    int24,
+                    uint16,
+                    uint16,
+                    uint16,
+                    uint8,
+                    bool
+                ) {
+                    if (sqrtPrice > 0) {
+                        poolAddress = pool;
+                        break;
+                    }
+                } catch {
+                    continue;
+                }
+            }
+        }
+
+        if (poolAddress == address(0)) {
+            return 0;
+        }
+
+        // Get current price and fee from pool
+        (uint160 sqrtPriceX96, , , , , , ) = IUniswapV3Pool(poolAddress)
+            .slot0();
+        uint24 fee = IUniswapV3Pool(poolAddress).fee();
+
+        if (sqrtPriceX96 == 0) {
+            return 0;
+        }
+
+        // Calculate price: price = (sqrtPriceX96 / 2^96)^2
+        uint256 Q96 = 2 ** 96;
+        uint256 Q192 = Q96 * Q96;
+        uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
+
+        // Apply fee: fee is in basis points (e.g., 3000 = 0.3% = 0.003)
+        // After fee: amountInAfterFee = amountIn * (1 - fee/1000000)
+        uint256 amountInAfterFee = (amountIn * (1000000 - fee)) / 1000000;
+
+        bool tokenInIsToken0 = tokenIn < tokenOut;
+
+        if (tokenInIsToken0) {
+            // Swapping token0 -> token1
+            // priceX96 = amount1/amount0 in Q192 format
+            // amountOut = amountInAfterFee * priceX96 / Q192
+            amountOut = (amountInAfterFee * priceX96) / Q192;
+        } else {
+            // Swapping token1 -> token0
+            // priceX96 = amount1/amount0, so amount0/amount1 = Q192/priceX96
+            // amountOut = amountInAfterFee * Q192 / priceX96
+            amountOut = (amountInAfterFee * Q192) / priceX96;
+        }
+
+        return amountOut;
+    }
 }

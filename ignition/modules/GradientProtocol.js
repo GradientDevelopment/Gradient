@@ -71,10 +71,6 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // 9.6. Explicitly set fee manager in orderbook
   m.call(gradientOrderbook, "setFeeManager", [gradientFeeManager]);
 
-  // 9.7. Set Uniswap V3 Factory in orderbook (if it uses V3)
-  // Note: Orderbook may have its own V3 factory setting, check if needed
-  // m.call(gradientOrderbook, "setUniswapV3Factory", [ROUTER_ADDRESSES.mainnet.uniswapV3Factory]);
-
   // 10. Configure orderbook settings for mainnet
   // Note: Most settings are already set in constructor:
   // - ethFeePercentage = 50 (0.5%)
@@ -86,6 +82,16 @@ module.exports = buildModule("GradientProtocol", (m) => {
 
   // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
+
+  // 10.5. Set Uniswap V3 Factory address in orderbook
+  m.call(gradientOrderbook, "setUniswapV3Factory", [
+    ROUTER_ADDRESSES.mainnet.uniswapV3Factory
+  ]);
+
+  // 10.6. Set Uniswap V3 Price Helper in orderbook
+  m.call(gradientOrderbook, "setUniswapV3PriceHelper", [
+    uniswapV3PriceHelper
+  ]);
 
   // 11. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [

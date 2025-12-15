@@ -611,8 +611,6 @@ contract FallbackExecutor is ReentrancyGuard, Ownable {
                             uint128 liquidity
                         ) {
                             if (liquidity > 0) {
-                                // For V3, we check if there's sufficient liquidity
-                                // The liquidity check is more complex in V3, but we can at least verify the pool exists and has liquidity
                                 return true;
                             }
                         } catch {

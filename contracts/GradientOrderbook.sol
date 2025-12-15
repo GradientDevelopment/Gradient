@@ -15,6 +15,7 @@ import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
+import {IUniswapV3PriceHelper} from "./interfaces/IUniswapV3PriceHelper.sol";
 import {GradientMarketMakerFactory} from "./GradientMarketMakerFactory.sol";
 
 /**
@@ -130,6 +131,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Uniswap V3 Factory address for accessing V3 pools
     address public uniswapV3Factory;
 
+    /// @notice Uniswap V3 Price Helper contract for price calculations
+    IUniswapV3PriceHelper public uniswapV3PriceHelper;
+
     /// @notice Common fee tiers for Uniswap V3 (500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
     uint24[] public v3FeeTiers = [500, 3000, 10000];
 
@@ -222,6 +226,9 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address indexed oldFactory,
         address indexed newFactory
     );
+
+    /// @notice Emitted when Uniswap V3 Price Helper is updated
+    event UniswapV3PriceHelperUpdated(address indexed priceHelper);
 
     /// @notice Emitted when V3 fee tiers are updated
     event V3FeeTiersUpdated(uint24[] feeTiers);
@@ -1635,10 +1642,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     function getCurrentMarketPrice(
         address token
     ) public view returns (uint256 marketPrice) {
-        // Try V3 first
-        uint256 v3Price = getPriceFromV3(token);
-        if (v3Price > 0) {
-            return v3Price;
+        // Try V3 first if price helper is set
+        if (address(uniswapV3PriceHelper) != address(0)) {
+            address routerAddress = gradientRegistry.router();
+            if (routerAddress != address(0)) {
+                uint8 decimals = IERC20Metadata(token).decimals();
+                uint256 v3Price = uniswapV3PriceHelper.getPriceFromV3(
+                    token,
+                    IUniswapV2Router02(routerAddress).WETH(),
+                    decimals
+                );
+                if (v3Price > 0) {
+                    return v3Price;
+                }
+            }
         }
 
         // Fall back to V2
@@ -1758,118 +1775,6 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice Gets V3 pool address for a token by trying different fee tiers
-    /// @param token Address of the token
-    /// @return poolAddress Address of the V3 pool, or address(0) if not found
-    function getV3PoolAddress(
-        address token
-    ) internal view returns (address poolAddress) {
-        if (uniswapV3Factory == address(0)) {
-            return address(0);
-        }
-
-        address routerAddress = gradientRegistry.router();
-        if (routerAddress == address(0)) {
-            return address(0);
-        }
-
-        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        address weth = router.WETH();
-
-        // Try different fee tiers to find an active pool
-        for (uint256 i = 0; i < v3FeeTiers.length; i++) {
-            address pool = IUniswapV3Factory(uniswapV3Factory).getPool(
-                token < weth ? token : weth,
-                token < weth ? weth : token,
-                uint24(v3FeeTiers[i])
-            );
-
-            if (pool != address(0)) {
-                // Check if pool has valid price data
-                try IUniswapV3Pool(pool).slot0() returns (
-                    uint160 sqrtPriceX96,
-                    int24,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint8,
-                    bool
-                ) {
-                    if (sqrtPriceX96 > 0) {
-                        return pool;
-                    }
-                } catch {
-                    continue;
-                }
-            }
-        }
-
-        return address(0);
-    }
-
-    /// @notice Gets price from Uniswap V3 pool
-    /// @param token Address of the token
-    /// @return price Price in ETH per token (18 decimals), or 0 if pool doesn't exist
-    function getPriceFromV3(
-        address token
-    ) internal view returns (uint256 price) {
-        address poolAddress = getV3PoolAddress(token);
-        if (poolAddress == address(0)) {
-            return 0;
-        }
-
-        address routerAddress = gradientRegistry.router();
-        if (routerAddress == address(0)) {
-            return 0;
-        }
-
-        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        address weth = router.WETH();
-
-        // Get price data from pool
-        (uint160 sqrtPriceX96, , , , , , ) = IUniswapV3Pool(poolAddress)
-            .slot0();
-
-        // Calculate price from sqrtPriceX96
-        // In Uniswap V3: sqrtPriceX96 = sqrt(amount1/amount0) * 2^96
-        // So: price = (sqrtPriceX96 / 2^96)^2 = amount1/amount0
-
-        bool tokenIsToken0 = token < weth;
-        uint256 Q96 = 2 ** 96;
-        uint256 Q192 = Q96 * Q96;
-
-        // Calculate priceX96 = sqrtPriceX96^2
-        uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
-
-        uint8 decimals = IERC20Metadata(token).decimals();
-
-        if (tokenIsToken0) {
-            // Token is token0, WETH is token1
-            // price = amount1/amount0 = WETH/token (in raw amounts)
-            // We want: ETH per token in 18 decimals
-            if (decimals <= 18) {
-                uint256 adjustment = 10 ** (18 - decimals);
-                price = (priceX96 * adjustment) / Q192;
-            } else {
-                uint256 adjustment = 10 ** (decimals - 18);
-                price = priceX96 / (Q192 * adjustment);
-            }
-        } else {
-            // Token is token1, WETH is token0
-            // price = amount1/amount0 = token/WETH (in raw amounts)
-            // We want: ETH per token, so invert: WETH/token = 1/price
-            if (decimals <= 18) {
-                uint256 adjustment = 10 ** (18 - decimals);
-                price = (Q192 * adjustment) / priceX96;
-            } else {
-                uint256 adjustment = 10 ** (decimals - 18);
-                price = Q192 / (priceX96 * adjustment);
-            }
-        }
-
-        return price;
-    }
-
     /// @notice Updates the maximum allowed price deviation from market price
     /// @param newDeviation New maximum price deviation in basis points (1 = 0.01%)
     /// @dev Only callable by contract owner
@@ -1888,6 +1793,20 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address oldFactory = uniswapV3Factory;
         uniswapV3Factory = _uniswapV3Factory;
         emit UniswapV3FactoryUpdated(oldFactory, _uniswapV3Factory);
+    }
+
+    /// @notice Sets the Uniswap V3 Price Helper address
+    /// @param _uniswapV3PriceHelper Address of the Uniswap V3 Price Helper
+    /// @dev Only callable by contract owner
+    function setUniswapV3PriceHelper(
+        IUniswapV3PriceHelper _uniswapV3PriceHelper
+    ) external onlyOwner {
+        require(
+            address(_uniswapV3PriceHelper) != address(0),
+            "Invalid price helper address"
+        );
+        uniswapV3PriceHelper = _uniswapV3PriceHelper;
+        emit UniswapV3PriceHelperUpdated(address(_uniswapV3PriceHelper));
     }
 
     /// @notice Sets the V3 fee tiers to check

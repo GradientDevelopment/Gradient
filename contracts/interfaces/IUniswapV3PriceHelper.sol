@@ -43,4 +43,18 @@ interface IUniswapV3PriceHelper {
         address routerAddress,
         uint8 tokenDecimals
     ) external view returns (uint256 price);
+
+    /**
+     * @notice Get amount out for a swap in Uniswap V3 (similar to V2's getAmountOut)
+     * @param amountIn Amount of input token
+     * @param tokenIn Address of the input token
+     * @param tokenOut Address of the output token
+     * @return amountOut Amount of output token that would be received
+     * @dev Returns 0 if pool doesn't exist or calculation fails
+     */
+    function getAmountOut(
+        uint256 amountIn,
+        address tokenIn,
+        address tokenOut
+    ) external view returns (uint256 amountOut);
 }
