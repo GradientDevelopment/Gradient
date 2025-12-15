@@ -13,6 +13,9 @@ import {IFallbackExecutor} from "./interfaces/IFallbackExecutor.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
+import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
+import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
+import {IUniswapV3PriceHelper} from "./interfaces/IUniswapV3PriceHelper.sol";
 import {GradientMarketMakerFactory} from "./GradientMarketMakerFactory.sol";
 
 /**
@@ -125,6 +128,15 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @notice Dust tolerance for automatic order fulfillment (in basis points, 1 = 0.01%)
     uint256 public dustTolerance = 100; // 1% default
 
+    /// @notice Uniswap V3 Factory address for accessing V3 pools
+    address public uniswapV3Factory;
+
+    /// @notice Uniswap V3 Price Helper contract for price calculations
+    IUniswapV3PriceHelper public uniswapV3PriceHelper;
+
+    /// @notice Common fee tiers for Uniswap V3 (500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
+    uint24[] public v3FeeTiers = [500, 3000, 10000];
+
     /// @notice Emitted when a new order is created
     event OrderCreated(
         uint256 indexed orderId,
@@ -208,6 +220,18 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
     /// @notice Emitted when dust tolerance is updated
     event DustToleranceUpdated(uint256 oldTolerance, uint256 newTolerance);
+
+    /// @notice Emitted when Uniswap V3 Factory is updated
+    event UniswapV3FactoryUpdated(
+        address indexed oldFactory,
+        address indexed newFactory
+    );
+
+    /// @notice Emitted when Uniswap V3 Price Helper is updated
+    event UniswapV3PriceHelperUpdated(address indexed priceHelper);
+
+    /// @notice Emitted when V3 fee tiers are updated
+    event V3FeeTiersUpdated(uint24[] feeTiers);
 
     // Modifiers
     modifier onlyAuthorizedFulfiller() {
@@ -1612,39 +1636,32 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         emit DustToleranceUpdated(oldDustTolerance, newDustTolerance);
     }
 
-    /// @notice Gets the current market price from Uniswap for a token
+    /// @notice Gets the current market price from Uniswap for a token (checks V3 first, then V2)
     /// @param token Address of the token
     /// @return marketPrice Current market price in ETH (18 decimals)
     function getCurrentMarketPrice(
         address token
     ) public view returns (uint256 marketPrice) {
-        address routerAddress = gradientRegistry.router();
-        require(routerAddress != address(0), "Router not set");
-
-        // Get reserves from the pair
-        (uint256 reserveETH, uint256 reserveToken) = getReserves(token);
-        require(reserveETH > 0 && reserveToken > 0, "Insufficient liquidity");
-
-        // Calculate price: ETH per token (18 decimals)
-        uint8 decimals = IERC20Metadata(token).decimals();
-
-        if (decimals == 18) {
-            // If token has 18 decimals, calculate directly
-            marketPrice = (reserveETH * 1e18) / reserveToken;
-        } else if (decimals < 18) {
-            uint256 scalingFactor = 10 ** (18 - decimals);
-            uint256 scaledReserveETH = reserveETH / scalingFactor;
-            marketPrice = (scaledReserveETH * 1e18) / reserveToken;
-        } else {
-            uint256 scalingFactor = 10 ** (decimals - 18);
-            uint256 scaledReserveToken = reserveToken / scalingFactor;
-            marketPrice = (reserveETH * 1e18) / scaledReserveToken;
+        // Try V3 first if price helper is set
+        if (address(uniswapV3PriceHelper) != address(0)) {
+            address routerAddress = gradientRegistry.router();
+            if (routerAddress != address(0)) {
+                uint8 decimals = IERC20Metadata(token).decimals();
+                uint256 v3Price = uniswapV3PriceHelper.getPriceFromV3(
+                    token,
+                    IUniswapV2Router02(routerAddress).WETH(),
+                    decimals
+                );
+                if (v3Price > 0) {
+                    return v3Price;
+                }
+            }
         }
 
-        // Ensure we have a reasonable price (not zero or extremely small)
-        require(marketPrice > 0, "Invalid market price calculated");
-
-        return marketPrice;
+        // Fall back to V2
+        uint256 v2Price = getPriceFromV2(token);
+        require(v2Price > 0, "No liquidity available in V2 or V3");
+        return v2Price;
     }
 
     /// @notice Validates execution price against current market price
@@ -1697,7 +1714,7 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         return deviation <= maxPriceDeviation;
     }
 
-    /// @notice Gets the reserves for a token pair from Uniswap
+    /// @notice Gets the reserves for a token pair from Uniswap V2
     /// @param token Address of the token
     /// @return reserveETH ETH reserve amount
     /// @return reserveToken Token reserve amount
@@ -1725,6 +1742,39 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             : (reserve0, reserve1);
     }
 
+    /// @notice Gets price from Uniswap V2 pool
+    /// @param token Address of the token
+    /// @return price Price in ETH per token (18 decimals), or 0 if pool doesn't exist
+    function getPriceFromV2(
+        address token
+    ) internal view returns (uint256 price) {
+        try this.getReserves(token) returns (
+            uint256 reserveETH,
+            uint256 reserveToken
+        ) {
+            if (reserveETH == 0 || reserveToken == 0) {
+                return 0;
+            }
+
+            // Calculate price: ETH per token (18 decimals)
+            uint8 decimals = IERC20Metadata(token).decimals();
+
+            if (decimals == 18) {
+                price = (reserveETH * 1e18) / reserveToken;
+            } else if (decimals < 18) {
+                uint256 scalingFactor = 10 ** (18 - decimals);
+                uint256 scaledReserveETH = reserveETH / scalingFactor;
+                price = (scaledReserveETH * 1e18) / reserveToken;
+            } else {
+                uint256 scalingFactor = 10 ** (decimals - 18);
+                uint256 scaledReserveToken = reserveToken / scalingFactor;
+                price = (reserveETH * 1e18) / scaledReserveToken;
+            }
+        } catch {
+            return 0;
+        }
+    }
+
     /// @notice Updates the maximum allowed price deviation from market price
     /// @param newDeviation New maximum price deviation in basis points (1 = 0.01%)
     /// @dev Only callable by contract owner
@@ -1733,6 +1783,40 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 oldDeviation = maxPriceDeviation;
         maxPriceDeviation = newDeviation;
         emit MaxPriceDeviationUpdated(oldDeviation, newDeviation);
+    }
+
+    /// @notice Sets the Uniswap V3 Factory address
+    /// @param _uniswapV3Factory Address of the Uniswap V3 Factory
+    /// @dev Only callable by contract owner
+    function setUniswapV3Factory(address _uniswapV3Factory) external onlyOwner {
+        require(_uniswapV3Factory != address(0), "Invalid factory address");
+        address oldFactory = uniswapV3Factory;
+        uniswapV3Factory = _uniswapV3Factory;
+        emit UniswapV3FactoryUpdated(oldFactory, _uniswapV3Factory);
+    }
+
+    /// @notice Sets the Uniswap V3 Price Helper address
+    /// @param _uniswapV3PriceHelper Address of the Uniswap V3 Price Helper
+    /// @dev Only callable by contract owner
+    function setUniswapV3PriceHelper(
+        IUniswapV3PriceHelper _uniswapV3PriceHelper
+    ) external onlyOwner {
+        require(
+            address(_uniswapV3PriceHelper) != address(0),
+            "Invalid price helper address"
+        );
+        uniswapV3PriceHelper = _uniswapV3PriceHelper;
+        emit UniswapV3PriceHelperUpdated(address(_uniswapV3PriceHelper));
+    }
+
+    /// @notice Sets the V3 fee tiers to check
+    /// @param _feeTiers Array of fee tiers (e.g., [500, 3000, 10000] for 0.05%, 0.3%, 1%)
+    /// @dev Only callable by contract owner
+    function setV3FeeTiers(uint24[] calldata _feeTiers) external onlyOwner {
+        require(_feeTiers.length > 0, "Fee tiers array cannot be empty");
+        require(_feeTiers.length <= 10, "Too many fee tiers");
+        v3FeeTiers = _feeTiers;
+        emit V3FeeTiersUpdated(_feeTiers);
     }
 
     // =============================== EMERGENCY FUNCTIONS ===============================

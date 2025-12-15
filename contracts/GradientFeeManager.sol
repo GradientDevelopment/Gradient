@@ -364,6 +364,33 @@ contract GradientFeeManager is IGradientFeeManager, Ownable {
         emit EmergencyWithdrawToken(token, recipient, withdrawAmount);
     }
 
+    /**
+     * @notice Emergency function to withdraw multiple tokens at once
+     * @param tokens Array of token addresses to withdraw
+     * @param recipient Address to receive all tokens
+     * @dev Only callable by contract owner in emergency situations
+     * @dev More gas efficient than calling emergencyWithdrawToken multiple times
+     */
+    function emergencyWithdrawMultipleTokens(
+        address[] calldata tokens,
+        address recipient
+    ) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(tokens.length > 0, "No tokens specified");
+        require(tokens.length <= 20, "Too many tokens to withdraw at once");
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            require(token != address(0), "Invalid token address");
+
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(token).safeTransfer(recipient, balance);
+                emit EmergencyWithdrawToken(token, recipient, balance);
+            }
+        }
+    }
+
     // Events for emergency withdrawals
     event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
     event EmergencyWithdrawToken(
