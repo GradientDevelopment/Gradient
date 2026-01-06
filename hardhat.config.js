@@ -22,7 +22,8 @@ module.exports = {
       chainId: 31337
     },
     mainnet: {
-      url: `https://eth-mainnet.nodereal.io/v1/${process.env.NODEREAL_API_KEY}`,
+      url: `https://mainnet.infura.io/v3/${process.env.MAIN_INFURA_API_KEY}`,
+      // url: `https://eth-mainnet.nodereal.io/v1/${process.env.NODEREAL_API_KEY}`,
       accounts: [privateKey],
       allowUnlimitedContractSize: true,
     },

@@ -94,7 +94,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     // Pool metrics with price range support
     struct PoolMetrics {
         uint256 position; // Total ETH or tokens
-        uint256 totalLPShares; // Total LP shares
         uint256 accRewardPerShare; // Accumulated rewards per share
         uint256 rewardBalance; // Available reward balance
         uint256 accountedPosition; // Accounted position for calculations
@@ -1579,13 +1578,44 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
             totalEthRemoved += ethRewards;
             (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
             if (!success) revert ETHWithdrawalFailed();
+
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    4, // ETH_REWARDS_CLAIMED
+                    ethRewards,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
 
         if (tokenProviderRewards > 0) {
             uint256 denormalizedRewards = _denormalizeFrom18Decimals(
                 tokenProviderRewards
             );
+            totalTokensRemoved += denormalizedRewards;
             tokenContract.safeTransfer(msg.sender, denormalizedRewards);
+
+            try
+                getEventAggregator().emitLiquidityEvent(
+                    msg.sender,
+                    address(tokenContract),
+                    5, // TOKEN_REWARDS_CLAIMED
+                    denormalizedRewards,
+                    userPriceRanges[msg.sender].minPrice,
+                    userPriceRanges[msg.sender].maxPrice
+                )
+            {
+                // Success - EventAggregator call completed
+            } catch {
+                // EventAggregator call failed - continue execution
+            }
         }
 
         emit FeeClaimed(msg.sender, totalRewards, address(tokenContract), true);
@@ -1645,6 +1675,20 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         (bool success, ) = payable(msg.sender).call{value: ethRewards}("");
         if (!success) revert ETHWithdrawalFailed();
 
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                4, // ETH_REWARDS_CLAIMED
+                ethRewards,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
         emit FeeClaimed(msg.sender, ethRewards, address(tokenContract), true);
     }
 
@@ -1711,6 +1755,21 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         );
         totalTokensRemoved += denormalizedRewards;
         tokenContract.safeTransfer(msg.sender, denormalizedRewards);
+
+        try
+            getEventAggregator().emitLiquidityEvent(
+                msg.sender,
+                address(tokenContract),
+                5, // TOKEN_REWARDS_CLAIMED
+                denormalizedRewards,
+                userPriceRanges[msg.sender].minPrice,
+                userPriceRanges[msg.sender].maxPrice
+            )
+        {
+            // Success - EventAggregator call completed
+        } catch {
+            // EventAggregator call failed - continue execution
+        }
 
         emit FeeClaimed(
             msg.sender,
@@ -1855,7 +1914,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         returns (PoolMetrics memory metrics)
     {
         metrics.position = totalETH;
-        metrics.totalLPShares = totalETH;
         metrics.accRewardPerShare = accRewardPerShare;
         metrics.rewardBalance = rewardBalance;
         metrics.accountedPosition = totalETH;
@@ -1871,7 +1929,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         returns (PoolMetrics memory metrics)
     {
         metrics.position = totalTokens;
-        metrics.totalLPShares = totalTokens;
         metrics.accRewardPerShare = accTokenRewardPerShare;
         metrics.rewardBalance = tokenProviderRewardBalance;
         metrics.accountedPosition = totalTokens;

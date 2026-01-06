@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IGradientMarketMakerFactory} from "./interfaces/IGradientMarketMakerFactory.sol";
 
 /**
  * @title EventAggregator
  * @notice Centralized event emission for all Gradient pools
- * @dev Reduces RPC calls by aggregating events from multiple pools into one contract
  */
-contract EventAggregator {
+contract EventAggregator is Ownable {
     // Factory address to verify pool calls
-    address public immutable factory;
+    address public factory;
 
     // Event types
     uint8 public constant ETH_ADD = 0;
@@ -58,8 +58,14 @@ contract EventAggregator {
         uint256 timestamp
     );
 
+    // Factory update event
+    event FactoryUpdated(
+        address indexed oldFactory,
+        address indexed newFactory
+    );
+
     // Constructor
-    constructor(address _factory) {
+    constructor(address _factory) Ownable(msg.sender) {
         require(_factory != address(0), "Invalid factory address");
         factory = _factory;
     }
@@ -224,6 +230,23 @@ contract EventAggregator {
         require(pool != address(0), "Invalid pool address");
 
         emit PoolCreated(token, pool, block.timestamp);
+    }
+
+    // =============================== ADMIN FUNCTIONS ===============================
+
+    /**
+     * @notice Set the factory address (only owner)
+     * @param _factory New factory address
+     * @dev Allows updating the factory when a new factory is deployed
+     */
+    function setFactory(address _factory) external onlyOwner {
+        require(_factory != address(0), "Invalid factory address");
+        require(_factory.code.length > 0, "Factory must be a contract");
+
+        address oldFactory = factory;
+        factory = _factory;
+
+        emit FactoryUpdated(oldFactory, _factory);
     }
 
     // =============================== VIEW FUNCTIONS ===============================

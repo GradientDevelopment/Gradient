@@ -3,13 +3,13 @@ const { ROUTER_ADDRESSES } = require("./config/addresses");
 
 // Deployed addresses on mainnet
 const DEPLOYED_ADDRESSES = {
-    GradientRegistry: "0x0486C945499FE312a57e54E2C3606B963cAAe244",
-    UniswapV3PriceHelper: "0xd9F15B3b04c5bCa761CfFbD97e2ef411A7c775E8",
-    FallbackExecutor: "0x207FC29CCCE39f934b97eFcf5DaAAB563642573f",
-    GradientFeeManager: "0xcD72c0539D8bF7EB321d3Fcc5FB1a3c288B7FC0a",
-    GradientMarketMakerFactory: "0x9c04f49A472D8592030f4088551C51b06bbC7b05",
-    GradientOrderbook: "0x2d036AFA7Df77Ba8375E1A544a6315A8fC89E9dE",
-    EventAggregator: "0x1189E32b4c602B516Ed1d6C5bBbA607C25966B1D",
+    "GradientRegistry": "0xdB7E3b94bd55FB9D93112830b23BAE82E33527c9",
+    "UniswapV3PriceHelper": "0x790521294b8F9058a3C69763c99333D309d7FF90",
+    "FallbackExecutor": "0x8b9cDD5c9e8292922F514AbE50B84922A033c867",
+    "GradientFeeManager": "0x6A3D8c4d5Cb61cC6764Fa54378467bfAe225fC7F",
+    "GradientMarketMakerFactory": "0x1B437eec9652e29BbD2B89a2F2d9B47Ea4Ea2B2F",
+    "GradientOrderbook": "0x605B99397c54556d97F6f807706b1ecC3c802B15",
+    "EventAggregator": "0xE189c082F9A0239f728fe4351558E1ffDE0DD1da",
 };
 
 async function main() {

@@ -1672,6 +1672,23 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         address token,
         uint256 executionPrice
     ) public view returns (bool) {
+        // Skip validation for v3 pairs
+        if (address(uniswapV3PriceHelper) != address(0)) {
+            address routerAddress = gradientRegistry.router();
+            if (routerAddress != address(0)) {
+                try
+                    uniswapV3PriceHelper.getV3PoolAddress(
+                        token,
+                        IUniswapV2Router02(routerAddress).WETH()
+                    )
+                returns (address v3Pool) {
+                    if (v3Pool != address(0)) {
+                        return true; // v3 pair exists - bypass validation
+                    }
+                } catch {}
+            }
+        }
+
         uint256 marketPrice = getCurrentMarketPrice(token);
 
         // Handle edge cases

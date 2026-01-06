@@ -28,7 +28,6 @@ interface IGradientMarketMakerPoolV3 {
     // Pool metrics with price range support
     struct PoolMetrics {
         uint256 totalPosition; // Total ETH or tokens
-        uint256 totalLPShares; // Total LP shares
         uint256 accRewardPerShare; // Accumulated rewards per share
         uint256 rewardBalance; // Available reward balance
         uint256 accountedPosition; // Accounted position for calculations

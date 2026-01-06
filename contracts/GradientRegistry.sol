@@ -235,7 +235,7 @@ contract GradientRegistry is AccessControl {
     function updateTimelockDuration(
         uint256 newDuration
     ) external onlyRole(ADMIN_ROLE) {
-        require(newDuration >= 2 hours, "Duration too short");
+        require(newDuration >= 30 minutes, "Duration too short");
         require(newDuration <= 7 days, "Duration too long");
 
         uint256 oldDuration = timelockDuration;
