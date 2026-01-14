@@ -148,7 +148,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 price,
         uint256 expirationTime,
         uint256 totalCost,
-        string objectId
+        string objectId,
+        bool isAutofallback
     );
 
     /// @notice Emitted when an order is cancelled by its owner
@@ -433,6 +434,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
     /// @param amount Amount of tokens to trade
     /// @param price For limit orders: exact price, For market orders: max price (buy) or min price (sell)
     /// @param ttl Time-to-live in seconds for the order
+    /// @param objectId Optional object ID for tracking
+    /// @param isAutofallback Whether this is an autofallback order
     /// @dev For buy orders, requires ETH to be sent with the transaction
     /// @dev For sell orders, requires token approval
     /// @return uint256 ID of the created order
@@ -443,7 +446,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 price,
         uint256 ttl,
-        string memory objectId
+        string memory objectId,
+        bool isAutofallback
     ) external payable validToken(token) nonReentrant returns (uint256) {
         require(amount > 0, "Amount must be greater than 0");
         require(price > 0, "Invalid price range");
@@ -497,7 +501,8 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
             price,
             expirationTime,
             totalCost,
-            objectId
+            objectId,
+            isAutofallback
         );
 
         if (orderType == OrderType.Buy && msg.value > totalCost) {
@@ -1110,17 +1115,16 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @notice Allows users to fulfill their own order via AMM
+    /// @notice Internal function to fulfill an order via AMM
     /// @param orderId ID of the order to fulfill
     /// @param fillAmount Amount of tokens to fill
     /// @param minAmountOut Minimum amount to receive (slippage protection)
-    /// @dev Only the order owner can call this function
     /// @dev Uses FallbackExecutor to find the best DEX and execute the trade
-    function fulfillOwnOrderWithAMM(
+    function _fulfillOrderWithAMM(
         uint256 orderId,
         uint256 fillAmount,
         uint256 minAmountOut
-    ) external nonReentrant orderExists(orderId) onlyOrderOwner(orderId) {
+    ) internal {
         require(fillAmount > 0, "Fill amount must be greater than 0");
 
         Order storage order = orders[orderId];
@@ -1230,6 +1234,35 @@ contract GradientOrderbook is Ownable, ReentrancyGuard {
 
         // Update order status
         _updateOrderStatus(orderId, actualFillAmount, effectiveExecutionPrice);
+    }
+
+    /// @notice Allows authorized fulfillers to automatically fulfill orders via AMM
+    /// @param orderId ID of the order to fulfill
+    /// @param fillAmount Amount of tokens to fill
+    /// @param minAmountOut Minimum amount to receive (slippage protection)
+    /// @dev Only authorized fulfillers can call this function
+    /// @dev Uses FallbackExecutor to find the best DEX and execute the trade
+    /// @dev This enables automatic order fulfillment so users don't need to manually fulfill their orders
+    function autoFallbackOrderWithAMM(
+        uint256 orderId,
+        uint256 fillAmount,
+        uint256 minAmountOut
+    ) external nonReentrant orderExists(orderId) onlyAuthorizedFulfiller {
+        _fulfillOrderWithAMM(orderId, fillAmount, minAmountOut);
+    }
+
+    /// @notice Allows users to fulfill their own order via AMM
+    /// @param orderId ID of the order to fulfill
+    /// @param fillAmount Amount of tokens to fill
+    /// @param minAmountOut Minimum amount to receive (slippage protection)
+    /// @dev Only the order owner can call this function
+    /// @dev Uses FallbackExecutor to find the best DEX and execute the trade
+    function fulfillOwnOrderWithAMM(
+        uint256 orderId,
+        uint256 fillAmount,
+        uint256 minAmountOut
+    ) external nonReentrant orderExists(orderId) onlyOrderOwner(orderId) {
+        _fulfillOrderWithAMM(orderId, fillAmount, minAmountOut);
     }
 
     /// @notice Internal function to update order status

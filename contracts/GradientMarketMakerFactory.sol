@@ -18,6 +18,7 @@ error PoolAlreadyExists();
 error TokenBlocked();
 error EthAmountMismatch();
 error TokenAmountZero();
+error InvalidUniv3Helper();
 
 /**
  * @title GradientMarketMakerFactory
@@ -28,6 +29,7 @@ contract GradientMarketMakerFactory is Ownable {
     using SafeERC20 for IERC20;
     IGradientRegistry public immutable gradientRegistry;
     IEventAggregator public eventAggregator;
+    address public univ3Helper;
 
     // Mapping from token address to pool address
     mapping(address => address) public getPool;
@@ -47,6 +49,10 @@ contract GradientMarketMakerFactory is Ownable {
     event EventAggregatorUpdated(
         address indexed oldEventAggregator,
         address indexed newEventAggregator
+    );
+    event Univ3HelperUpdated(
+        address indexed oldUniv3Helper,
+        address indexed newUniv3Helper
     );
 
     constructor(
@@ -81,6 +87,18 @@ contract GradientMarketMakerFactory is Ownable {
             oldEventAggregator,
             address(_eventAggregator)
         );
+    }
+
+    /**
+     * @notice Set the UniswapV3PriceHelper address
+     * @param _univ3Helper New UniswapV3PriceHelper address
+     */
+    function setUniv3Helper(address _univ3Helper) external onlyOwner {
+        if (_univ3Helper != address(0) && _univ3Helper.code.length == 0)
+            revert InvalidUniv3Helper();
+        address oldUniv3Helper = univ3Helper;
+        univ3Helper = _univ3Helper;
+        emit Univ3HelperUpdated(oldUniv3Helper, _univ3Helper);
     }
 
     /**

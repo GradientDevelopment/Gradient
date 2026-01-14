@@ -7,7 +7,7 @@ const DEPLOYED_ADDRESSES = {
     "UniswapV3PriceHelper": "0x790521294b8F9058a3C69763c99333D309d7FF90",
     "FallbackExecutor": "0x8b9cDD5c9e8292922F514AbE50B84922A033c867",
     "GradientFeeManager": "0x6A3D8c4d5Cb61cC6764Fa54378467bfAe225fC7F",
-    "GradientMarketMakerFactory": "0x1B437eec9652e29BbD2B89a2F2d9B47Ea4Ea2B2F",
+    "GradientMarketMakerFactory": "0x22EAc0E9E1dcCf5293beE8f92D4C26F917B24F2D",
     "GradientOrderbook": "0x605B99397c54556d97F6f807706b1ecC3c802B15",
     "EventAggregator": "0xE189c082F9A0239f728fe4351558E1ffDE0DD1da",
 };

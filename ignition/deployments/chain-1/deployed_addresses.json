@@ -6,5 +6,7 @@
   "GradientProtocol#GradientMarketMakerFactory": "0x1B437eec9652e29BbD2B89a2F2d9B47Ea4Ea2B2F",
   "GradientProtocol#GradientOrderbook": "0x9eA517ABAd3759f92eed9C8e45a7023231ABdC7d",
   "GradientProtocol#EventAggregator": "0xE189c082F9A0239f728fe4351558E1ffDE0DD1da",
-  "DeployOrderbook#GradientOrderbook": "0x605B99397c54556d97F6f807706b1ecC3c802B15"
+  "DeployOrderbook#GradientOrderbook": "0x605B99397c54556d97F6f807706b1ecC3c802B15",
+  "DeployFactoryV2#GradientMarketMakerFactory": "0x22EAc0E9E1dcCf5293beE8f92D4C26F917B24F2D",
+  "DeployOrderbookV2#GradientOrderbook": "0xcf7D049C2cAe13970F2036DEe07E7A1dA75a5932"
 }

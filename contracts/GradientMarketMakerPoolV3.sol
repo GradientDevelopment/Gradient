@@ -238,9 +238,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     // Uniswap pair address
     address public uniswapPair;
 
-    // Uniswap V3 Price Helper for accessing V3 pools
-    IUniswapV3PriceHelper public priceHelper;
-
     // Merkle root for LP share updates
     bytes32 public merkleRoot;
     uint256 public currentVersion;
@@ -324,6 +321,18 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
      */
     function getEventAggregator() public view returns (IEventAggregator) {
         return IEventAggregator(factoryContract.getEventAggregator());
+    }
+
+    /**
+     * @notice Get the Uniswap V3 helper address from the factory
+     * @return univ3HelperAddress Address of the UniswapV3PriceHelper
+     */
+    function getUniv3Helper() public view returns (IUniswapV3PriceHelper) {
+        address helperAddress = factoryContract.univ3Helper();
+        if (helperAddress == address(0)) {
+            return IUniswapV3PriceHelper(address(0));
+        }
+        return IUniswapV3PriceHelper(helperAddress);
     }
 
     /**
@@ -866,8 +875,9 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         address weth = router.WETH();
 
         // Try V3 first
-        if (address(priceHelper) != address(0)) {
-            address v3Pool = priceHelper.getV3PoolAddress(
+        IUniswapV3PriceHelper helper = getUniv3Helper();
+        if (address(helper) != address(0)) {
+            address v3Pool = helper.getV3PoolAddress(
                 address(tokenContract),
                 weth
             );
@@ -1971,17 +1981,6 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         if (_minTokenLiquidity == 0) revert InvalidMinTokenLiquidity();
         minTokenLiquidity = _minTokenLiquidity;
         emit MinLiquidityUpdated(_minTokenLiquidity, false);
-    }
-
-    /**
-     * @notice Sets the Uniswap V3 Price Helper address
-     * @param _priceHelper Address of the Uniswap V3 Price Helper
-     * @dev Only callable by owner
-     */
-    function setPriceHelper(
-        IUniswapV3PriceHelper _priceHelper
-    ) external onlyOwner {
-        priceHelper = _priceHelper;
     }
 
     /**

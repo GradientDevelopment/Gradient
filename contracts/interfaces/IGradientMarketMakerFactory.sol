@@ -46,6 +46,11 @@ interface IGradientMarketMakerFactory {
     function getRegistry() external view returns (address);
 
     /**
+     * @notice Get the Uniswap V3 helper address (public variable, auto-generated getter)
+     */
+    function univ3Helper() external view returns (address);
+
+    /**
      * @notice Check if a given address is a valid pool
      * @param poolAddress Address to check
      * @return isValid True if the address is a valid pool
