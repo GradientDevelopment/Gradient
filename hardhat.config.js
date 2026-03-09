@@ -27,16 +27,21 @@ module.exports = {
       accounts: [privateKey],
       allowUnlimitedContractSize: true,
     },
+    base: {
+      url: `https://base-mainnet.infura.io/v3/${process.env.MAIN_INFURA_API_KEY}`,
+      accounts: [privateKey],
+      allowUnlimitedContractSize: true,
+    },
+    bsc: {
+      url: `https://bsc-dataseed.bnbchain.org`,
+      accounts: [privateKey],
+      allowUnlimitedContractSize: true,
+    },
     bsctest: {
       url: "https://data-seed-prebsc-1-s1.binance.org:8545/",
       accounts: [privateKeyTest],
       allowUnlimitedContractSize: true,
-    },
-    base: {
-      url: `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY}`,
-      accounts: [privateKeyTest],
-      allowUnlimitedContractSize: true,
-    },
+    }
   },
   etherscan: {
     apiKey: process.env.ETHERSCAN_API_KEY,

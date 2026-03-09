@@ -1,0 +1,9 @@
+{
+  "GradientProtocolBase#GradientRegistry": "0xcB867D08AFe6638BF16614f6F8bC64ea924F5b19",
+  "GradientProtocolBase#UniswapV3PriceHelper": "0x5C3435dDf5f544461210Fd79017aa344c8e0352E",
+  "GradientProtocolBase#FallbackExecutor": "0x7128DA620FCFD1F5360235825BE204C2258ad29a",
+  "GradientProtocolBase#GradientFeeManager": "0x82edF6C519a0Bc36eE73f8fC5336D637629646db",
+  "GradientProtocolBase#GradientMarketMakerFactory": "0x917cf22b3471B0A8622Cf236B4ba3f68bfa5F3DF",
+  "GradientProtocolBase#GradientOrderbook": "0xAA1d097339d217D28BF6346e5fd49E8d1118Df9b",
+  "GradientProtocolBase#EventAggregator": "0xdd8f1eBc577d97530211562183FC8954eF27788D"
+}
