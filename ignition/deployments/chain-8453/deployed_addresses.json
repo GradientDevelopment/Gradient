@@ -5,5 +5,6 @@
   "GradientProtocolBase#GradientFeeManager": "0x82edF6C519a0Bc36eE73f8fC5336D637629646db",
   "GradientProtocolBase#GradientMarketMakerFactory": "0x917cf22b3471B0A8622Cf236B4ba3f68bfa5F3DF",
   "GradientProtocolBase#GradientOrderbook": "0xAA1d097339d217D28BF6346e5fd49E8d1118Df9b",
-  "GradientProtocolBase#EventAggregator": "0xdd8f1eBc577d97530211562183FC8954eF27788D"
+  "GradientProtocolBase#EventAggregator": "0xdd8f1eBc577d97530211562183FC8954eF27788D",
+  "DeployFallbackExecutorV2#FallbackExecutorV2": "0x9de2619313358084F743c3aa4E653A315D2f3FE0"
 }
