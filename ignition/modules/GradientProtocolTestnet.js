@@ -37,6 +37,13 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
         {}
     );
 
+    const dexQuoteHelper = m.contract("GradientDexQuoteHelper", [], {});
+    m.call(dexQuoteHelper, "addVenue", [
+        ROUTER_ADDRESSES.bsctest.uniswapV2Router,
+        uniswapV3PriceHelper,
+    ]);
+    m.call(gradientMarketMakerFactory, "setDexQuoteHelper", [dexQuoteHelper]);
+
     // 8. Deploy GradientOrderbook (depends on registry)
     const gradientOrderbook = m.contract("GradientOrderbook", [
         gradientRegistry
@@ -70,15 +77,7 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
     // Override maxOrderTtl to 7 days for testnet (shorter than default 30 days)
     m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-    // 10.5. Set Uniswap V3 Factory address in orderbook
-    m.call(gradientOrderbook, "setUniswapV3Factory", [
-        ROUTER_ADDRESSES.bsctest.uniswapV3Factory
-    ]);
-
-    // 10.6. Set Uniswap V3 Price Helper in orderbook
-    m.call(gradientOrderbook, "setUniswapV3PriceHelper", [
-        uniswapV3PriceHelper
-    ]);
+    m.call(gradientOrderbook, "setDexQuoteHelper", [dexQuoteHelper]);
 
     // 11. Authorize deployer as fulfiller in registry
     m.call(gradientRegistry, "authorizeFulfiller", [
@@ -120,6 +119,7 @@ module.exports = buildModule("GradientProtocolTestnet", (m) => {
         fallbackExecutor,
         gradientFeeManager,
         gradientOrderbook,
-        uniswapV3PriceHelper
+        uniswapV3PriceHelper,
+        dexQuoteHelper,
     };
 }); 

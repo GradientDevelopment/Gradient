@@ -13,13 +13,13 @@ module.exports = {
       viaIR: true,
       optimizer: {
         enabled: true,
-        runs: 1
-      }
-    }
+        runs: 1,
+      },
+    },
   },
   networks: {
     hardhat: {
-      chainId: 31337
+      chainId: 31337,
     },
     mainnet: {
       url: `https://mainnet.infura.io/v3/${process.env.MAIN_INFURA_API_KEY}`,
@@ -39,9 +39,9 @@ module.exports = {
     },
     bsctest: {
       url: "https://data-seed-prebsc-1-s1.binance.org:8545/",
-      accounts: [privateKeyTest],
+      accounts: [privateKey],
       allowUnlimitedContractSize: true,
-    }
+    },
   },
   etherscan: {
     apiKey: process.env.ETHERSCAN_API_KEY,
@@ -51,9 +51,9 @@ module.exports = {
         chainId: 97,
         urls: {
           apiURL: "https://api.etherscan.io/v2/api?chainid=97",
-          browserURL: "https://testnet.bscscan.com"
-        }
-      }
-    ]
+          browserURL: "https://testnet.bscscan.com",
+        },
+      },
+    ],
   },
 };

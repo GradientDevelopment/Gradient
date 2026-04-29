@@ -4,7 +4,7 @@ const {
   GREY_TOKEN_ADDRESS,
 } = require("../../config/addresses");
 
-module.exports = buildModule("GradientProtocolBnb", (m) => {
+module.exports = buildModule("GradientProtocolBnbTestnet", (m) => {
   // 1. Deploy GradientRegistry first (central registry)
   const deployer = m.getAccount(0);
   const gradientRegistry = m.contract("GradientRegistry", [], {});
@@ -49,21 +49,21 @@ module.exports = buildModule("GradientProtocolBnb", (m) => {
     dexQuoteHelper,
     "addVenue",
     [
-      ROUTER_ADDRESSES.bsc.uniswapV2Router,
-      ROUTER_ADDRESSES.bsc.uniswapV3Factory,
-      false,
+      ROUTER_ADDRESSES.bsctest.uniswapV2Router,
+      ROUTER_ADDRESSES.bsctest.uniswapV3Factory,
+      "false",
     ],
-    { id: "addVenueUniswap" },
+    { id: "AddVenueUniswap" },
   );
   m.call(
     dexQuoteHelper,
     "addVenue",
     [
-      ROUTER_ADDRESSES.bsc.pancakeV2Router,
-      ROUTER_ADDRESSES.bsc.pancakeV3Factory,
-      true,
+      ROUTER_ADDRESSES.bsctest.pancakeV2Router,
+      ROUTER_ADDRESSES.bsctest.pancakeV3Factory,
+      "true",
     ],
-    { id: "addVenuePancake" },
+    { id: "AddVenuePancakeswap" },
   );
   m.call(gradientMarketMakerFactory, "setDexQuoteHelper", [dexQuoteHelper]);
 
@@ -80,7 +80,7 @@ module.exports = buildModule("GradientProtocolBnb", (m) => {
     GREY_TOKEN_ADDRESS,
     gradientOrderbook,
     fallbackExecutor,
-    ROUTER_ADDRESSES.bsc.uniswapV2Router,
+    ROUTER_ADDRESSES.bsctest.uniswapV2Router,
     gradientFeeManager,
   ]);
 
@@ -99,59 +99,59 @@ module.exports = buildModule("GradientProtocolBnb", (m) => {
   m.call(gradientRegistry, "setRewardDistributor", [gradientFeeManager]);
 
   // 13. Configure fallback executor for BNB (PancakeSwap V2)
+  // m.call(
+  //   fallbackExecutor,
+  //   "addDEX",
+  //   [
+  //     ROUTER_ADDRESSES.bsctest.uniswapV2Router,
+  //     ROUTER_ADDRESSES.bsctest.uniswapV2Router,
+  //     1,
+  //   ],
+  //   { id: "addDexUniswap" },
+  // );
+
+  // m.call(
+  //   fallbackExecutor,
+  //   "addV3DEX",
+  //   [
+  //     ROUTER_ADDRESSES.bsctest.uniswapV3Router,
+  //     ROUTER_ADDRESSES.bsctest.uniswapV3Router,
+  //     ROUTER_ADDRESSES.bsctest.uniswapV3Factory,
+  //     2,
+  //     false,
+  //   ],
+  //   { id: "addV3DexUniswap" },
+  // );
+
   m.call(
     fallbackExecutor,
     "addDEX",
     [
-      ROUTER_ADDRESSES.bsc.uniswapV2Router,
-      ROUTER_ADDRESSES.bsc.uniswapV2Router,
-      1,
-    ],
-    { id: "addDexUniswap" },
-  );
-
-  m.call(
-    fallbackExecutor,
-    "addV3DEX",
-    [
-      ROUTER_ADDRESSES.bsc.uniswapV3Router,
-      ROUTER_ADDRESSES.bsc.uniswapV3Router,
-      ROUTER_ADDRESSES.bsc.uniswapV3Factory,
-      2,
-      false,
-    ],
-    { id: "addDexV3Uniswap" },
-  );
-
-  m.call(
-    fallbackExecutor,
-    "addDEX",
-    [
-      ROUTER_ADDRESSES.bsc.pancakeV2Router,
-      ROUTER_ADDRESSES.bsc.pancakeV2Router,
+      ROUTER_ADDRESSES.bsctest.pancakeV2Router,
+      ROUTER_ADDRESSES.bsctest.pancakeV2Router,
       3,
     ],
-    { id: "addDexPancakeswap" },
+    { id: "addDexPancake" },
   );
 
   m.call(
     fallbackExecutor,
     "addV3DEX",
     [
-      ROUTER_ADDRESSES.bsc.pancakeV3Router,
-      ROUTER_ADDRESSES.bsc.pancakeV3Router,
-      ROUTER_ADDRESSES.bsc.pancakeV3Factory,
+      ROUTER_ADDRESSES.bsctest.pancakeV3Router,
+      ROUTER_ADDRESSES.bsctest.pancakeV3Router,
+      ROUTER_ADDRESSES.bsctest.pancakeV3Factory,
       4,
       true,
     ],
-    { id: "addV3DEXPancakeswap" },
+    { id: "addV3DexPancake" },
   );
 
   // 13.5. Add PancakeSwap V3 as a DEX
   // m.call(fallbackExecutor, "addV3DEX", [
-  //   ROUTER_ADDRESSES.bsc.uniswapV3Router,
-  //   ROUTER_ADDRESSES.bsc.uniswapV3Router,
-  //   ROUTER_ADDRESSES.bsc.uniswapV3Factory,
+  //   ROUTER_ADDRESSES.bsctest.uniswapV3Router,
+  //   ROUTER_ADDRESSES.bsctest.uniswapV3Router,
+  //   ROUTER_ADDRESSES.bsctest.uniswapV3Factory,
   //   2
   // ]);
 

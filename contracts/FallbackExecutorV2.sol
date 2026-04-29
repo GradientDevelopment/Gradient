@@ -11,6 +11,7 @@ import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV3SwapRouterV2} from "./interfaces/IUniswapV3SwapRouterV2.sol";
 import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
+import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 import {IWETH9} from "./interfaces/IWETH9.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
 
@@ -37,17 +38,20 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         address factory;
         DEXVersion version;
         bool isActive;
-        uint256 priority; // Lower number = higher priority
+        bool isPancakeType;
+        uint256 priority;
     }
 
     // State variables
     mapping(address => DEXConfig) public dexes;
     address[] public activeDEXes;
-    mapping(address => uint256) public dexIndex; // Track DEX position in array for O(1) removal
+    mapping(address => uint256) public dexIndex;
 
     uint256 public maxDEXs = 5;
     uint256 public constant MAX_DEADLINE = 300; // 5 minutes
     uint256 public minLiquidityThreshold = 10 ether; // Minimum liquidity in ETH equivalent
+    // Fee tiers used when searching for V3 pools
+    uint24[3] public FEE_TIERS = [500, 3000, 10000];
 
     // Events
     event DEXAdded(
@@ -68,8 +72,13 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         uint256 amountOut,
         bool isBuy
     );
+    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
+    event EmergencyWithdrawToken(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
 
-    // Modifiers
     modifier onlyOrderbook() {
         require(
             msg.sender == gradientRegistry.orderbook(),
@@ -94,8 +103,7 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         uint256 priority
     ) external onlyOwner {
         require(activeDEXes.length < maxDEXs, "Max DEXs reached");
-        require(dex != address(0), "Invalid DEX");
-        require(router != address(0), "Invalid router");
+        require(dex != address(0) && router != address(0), "Invalid address");
         require(!dexes[dex].isActive, "DEX already exists");
 
         address factory = IUniswapV2Router02(router).factory();
@@ -104,13 +112,11 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
             factory: factory,
             version: DEXVersion.V2,
             isActive: true,
+            isPancakeType: false,
             priority: priority
         });
 
-        activeDEXes.push(dex);
-        dexIndex[dex] = activeDEXes.length - 1; // Set initial index
-        _sortDEXesByPriority();
-
+        _addAndSort(dex);
         emit DEXAdded(dex, router, factory, DEXVersion.V2);
     }
 
@@ -125,12 +131,14 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         address dex,
         address router,
         address factory,
-        uint256 priority
+        uint256 priority,
+        bool isPancakeType
     ) external onlyOwner {
         require(activeDEXes.length < maxDEXs, "Max DEXs reached");
-        require(dex != address(0), "Invalid DEX");
-        require(router != address(0), "Invalid router");
-        require(factory != address(0), "Invalid factory");
+        require(
+            dex != address(0) && router != address(0) && factory != address(0),
+            "Invalid address"
+        );
         require(!dexes[dex].isActive, "DEX already exists");
 
         dexes[dex] = DEXConfig({
@@ -138,13 +146,11 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
             factory: factory,
             version: DEXVersion.V3,
             isActive: true,
+            isPancakeType: isPancakeType,
             priority: priority
         });
 
-        activeDEXes.push(dex);
-        dexIndex[dex] = activeDEXes.length - 1; // Set initial index
-        _sortDEXesByPriority();
-
+        _addAndSort(dex);
         emit DEXAdded(dex, router, factory, DEXVersion.V3);
     }
 
@@ -155,8 +161,8 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
     function removeDEX(address dex) external onlyOwner {
         require(dexes[dex].isActive, "DEX not found");
 
-        uint256 lastDEXIndex = activeDEXes.length - 1;
-        address lastDEX = activeDEXes[lastDEXIndex];
+        uint256 lastIdx = activeDEXes.length - 1;
+        address lastDEX = activeDEXes[lastIdx];
 
         // Swap the element to remove with the last element
         activeDEXes[dexIndex[dex]] = lastDEX;
@@ -165,7 +171,6 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         // Remove the last element
         activeDEXes.pop();
         delete dexIndex[dex];
-
         dexes[dex].isActive = false;
 
         emit DEXRemoved(dex);
@@ -178,13 +183,12 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
      * @dev Higher thresholds provide better protection but may exclude more DEXes
      */
     function setMinLiquidityThreshold(uint256 newThreshold) external onlyOwner {
-        require(newThreshold > 0, "Threshold must be greater than 0");
-        require(newThreshold <= 1000 ether, "Threshold too high"); // Reasonable upper limit
-
-        uint256 oldThreshold = minLiquidityThreshold;
+        require(
+            newThreshold > 0 && newThreshold <= 10000 ether,
+            "Invalid threshold"
+        );
+        emit MinLiquidityThresholdUpdated(minLiquidityThreshold, newThreshold);
         minLiquidityThreshold = newThreshold;
-
-        emit MinLiquidityThresholdUpdated(oldThreshold, newThreshold);
     }
 
     /**
@@ -217,28 +221,11 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         require(bestDEX != address(0), "No suitable DEX found");
 
         DEXConfig storage dexConfig = dexes[bestDEX];
-
-        // Route to V2 or V3 based on DEX version
-        if (dexConfig.version == DEXVersion.V2) {
-            amountOut = _executeV2Trade(
-                dexConfig,
-                token,
-                amount,
-                minAmountOut,
-                isBuy
-            );
-        } else {
-            amountOut = _executeV3Trade(
-                dexConfig,
-                token,
-                amount,
-                minAmountOut,
-                isBuy
-            );
-        }
+        amountOut = dexConfig.version == DEXVersion.V2
+            ? _executeV2Trade(dexConfig, token, amount, minAmountOut, isBuy)
+            : _executeV3Trade(dexConfig, token, amount, minAmountOut, isBuy);
 
         emit TradeExecuted(token, bestDEX, amount, amountOut, isBuy);
-        return amountOut;
     }
 
     /**
@@ -258,39 +245,25 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         bool isBuy
     ) internal returns (uint256 amountOut) {
         IUniswapV2Router02 router = IUniswapV2Router02(dexConfig.router);
+        address weth = router.WETH();
 
-        // Prepare path
         address[] memory path = new address[](2);
         if (isBuy) {
-            path[0] = router.WETH(); // WETH
+            path[0] = weth;
             path[1] = token;
-        } else {
-            path[0] = token;
-            path[1] = router.WETH(); // WETH
-        }
 
-        // Execute trade
-        if (isBuy) {
-            // Buy tokens with ETH
             uint256 balanceBefore = IERC20(token).balanceOf(msg.sender);
-
             router.swapExactETHForTokensSupportingFeeOnTransferTokens{
                 value: amount
             }(minAmountOut, path, msg.sender, block.timestamp + MAX_DEADLINE);
-
-            uint256 balanceAfter = IERC20(token).balanceOf(msg.sender);
-            amountOut = balanceAfter - balanceBefore;
-
-            // Validate slippage protection
-            require(amountOut >= minAmountOut, "Insufficient output amount");
+            amountOut = IERC20(token).balanceOf(msg.sender) - balanceBefore;
         } else {
-            // Sell tokens for ETH
+            path[0] = token;
+            path[1] = weth;
+
             uint256 balanceBefore = address(this).balance;
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-
-            // Safe approval pattern
-            _safeApprove(token, dexConfig.router, amount);
-
+            IERC20(token).forceApprove(dexConfig.router, amount);
             router.swapExactTokensForETHSupportingFeeOnTransferTokens(
                 amount,
                 minAmountOut,
@@ -298,17 +271,13 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
                 address(this),
                 block.timestamp + MAX_DEADLINE
             );
+            amountOut = address(this).balance - balanceBefore;
 
-            uint256 balanceAfter = address(this).balance;
-            amountOut = balanceAfter - balanceBefore;
-
-            // Validate slippage protection
-            require(amountOut >= minAmountOut, "Insufficient output amount");
-
-            // Transfer ETH to caller
             (bool success, ) = msg.sender.call{value: amountOut}("");
             require(success, "ETH transfer failed");
         }
+
+        require(amountOut >= minAmountOut, "Insufficient output amount");
     }
 
     /**
@@ -327,58 +296,27 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         uint256 minAmountOut,
         bool isBuy
     ) internal returns (uint256 amountOut) {
-        IUniswapV3SwapRouterV2 router = IUniswapV3SwapRouterV2(dexConfig.router);
-        IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
-
-        // Get WETH address - for V3, we need to get it from a V2 router or store it
-        // For now, we'll use a common approach: try to get it from the first V2 DEX if available
         address weth = _getWETHAddress();
         require(weth != address(0), "WETH address not found");
 
-        // Find the best V3 pool (try common fee tiers: 500, 3000, 10000)
-        uint24[] memory feeTiers = new uint24[](3);
-        feeTiers[0] = 500; // 0.05%
-        feeTiers[1] = 3000; // 0.3%
-        feeTiers[2] = 10000; // 1%
-
-        address poolAddress = address(0);
-        uint24 poolFee = 0;
-
-        for (uint256 i = 0; i < feeTiers.length; i++) {
-            address pool = factory.getPool(
-                token < weth ? token : weth,
-                token < weth ? weth : token,
-                feeTiers[i]
-            );
-            if (pool != address(0)) {
-                // Check if pool has liquidity
-                try IUniswapV3Pool(pool).liquidity() returns (
-                    uint128 liquidity
-                ) {
-                    if (liquidity > 0) {
-                        poolAddress = pool;
-                        poolFee = feeTiers[i];
-                        break;
-                    }
-                } catch {
-                    continue;
-                }
-            }
-        }
-
+        (address poolAddress, uint24 poolFee) = _findV3Pool(
+            dexConfig,
+            token,
+            weth
+        );
         require(poolAddress != address(0), "No V3 pool found");
 
-        // Execute trade
+        IUniswapV3SwapRouterV2 router = IUniswapV3SwapRouterV2(
+            dexConfig.router
+        );
+
         if (isBuy) {
-            // Buy tokens with ETH
-            // Wrap ETH to WETH first, then swap
             IWETH9(weth).deposit{value: amount}();
-            _safeApprove(weth, dexConfig.router, amount);
+            IERC20(weth).forceApprove(dexConfig.router, amount);
 
             uint256 balanceBefore = IERC20(token).balanceOf(msg.sender);
-
-            IUniswapV3SwapRouterV2.ExactInputSingleParams
-                memory params = IUniswapV3SwapRouterV2.ExactInputSingleParams({
+            router.exactInputSingle(
+                IUniswapV3SwapRouterV2.ExactInputSingleParams({
                     tokenIn: weth,
                     tokenOut: token,
                     fee: poolFee,
@@ -386,25 +324,16 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
                     amountIn: amount,
                     amountOutMinimum: minAmountOut,
                     sqrtPriceLimitX96: 0
-                });
-
-            router.exactInputSingle(params);
-
-            uint256 balanceAfter = IERC20(token).balanceOf(msg.sender);
-            amountOut = balanceAfter - balanceBefore;
-
-            // Validate slippage protection
-            require(amountOut >= minAmountOut, "Insufficient output amount");
+                })
+            );
+            amountOut = IERC20(token).balanceOf(msg.sender) - balanceBefore;
         } else {
-            // Sell tokens for ETH
             uint256 balanceBefore = address(this).balance;
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+            IERC20(token).forceApprove(dexConfig.router, amount);
 
-            // Safe approval pattern
-            _safeApprove(token, dexConfig.router, amount);
-
-            IUniswapV3SwapRouterV2.ExactInputSingleParams
-                memory params = IUniswapV3SwapRouterV2.ExactInputSingleParams({
+            router.exactInputSingle(
+                IUniswapV3SwapRouterV2.ExactInputSingleParams({
                     tokenIn: token,
                     tokenOut: weth,
                     fee: poolFee,
@@ -412,98 +341,73 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
                     amountIn: amount,
                     amountOutMinimum: minAmountOut,
                     sqrtPriceLimitX96: 0
-                });
+                })
+            );
 
-            router.exactInputSingle(params);
-
-            // Unwrap WETH to ETH
             uint256 wethBalance = IERC20(weth).balanceOf(address(this));
-            if (wethBalance > 0) {
-                IWETH9(weth).withdraw(wethBalance);
-            }
+            if (wethBalance > 0) IWETH9(weth).withdraw(wethBalance);
 
-            uint256 balanceAfter = address(this).balance;
-            amountOut = balanceAfter - balanceBefore;
+            amountOut = address(this).balance - balanceBefore;
 
-            // Validate slippage protection
-            require(amountOut >= minAmountOut, "Insufficient output amount");
-
-            // Transfer ETH to caller
             (bool success, ) = msg.sender.call{value: amountOut}("");
             require(success, "ETH transfer failed");
         }
+
+        require(amountOut >= minAmountOut, "Insufficient output amount");
     }
 
-    /**
-     * @notice Get WETH address from any V2 DEX or return a stored address
-     * @return weth The WETH address
-     */
-    function _getWETHAddress() internal view returns (address weth) {
-        // Try to get WETH from any V2 DEX
+    // =============================== INTERNAL HELPERS ===============================
+
+    function _addAndSort(address dex) internal {
+        activeDEXes.push(dex);
+        dexIndex[dex] = activeDEXes.length - 1;
+        _sortDEXesByPriority();
+    }
+
+    function _getWETHAddress() internal view returns (address) {
         for (uint256 i = 0; i < activeDEXes.length; i++) {
             DEXConfig storage config = dexes[activeDEXes[i]];
             if (config.version == DEXVersion.V2 && config.isActive) {
                 try IUniswapV2Router02(config.router).WETH() returns (
-                    address wethAddr
+                    address weth
                 ) {
-                    return wethAddr;
-                } catch {
-                    continue;
-                }
+                    return weth;
+                } catch {}
             }
         }
         return address(0);
     }
 
-    /**
-     * @notice Get the best DEX for a trade
-     * @param token The token to trade
-     * @param amount The amount to trade
-     * @param isBuy Whether this is a buy or sell order
-     * @return The address of the best DEX
-     */
+    function _findV3Pool(
+        DEXConfig storage dexConfig,
+        address token,
+        address weth
+    ) internal view returns (address poolAddress, uint24 poolFee) {
+        IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
+        (address t0, address t1) = token < weth ? (token, weth) : (weth, token);
+
+        for (uint256 i = 0; i < FEE_TIERS.length; i++) {
+            address pool = factory.getPool(t0, t1, FEE_TIERS[i]);
+            if (pool == address(0)) continue;
+
+            try IUniswapV3Pool(pool).liquidity() returns (uint128 liquidity) {
+                if (liquidity > 0) return (pool, FEE_TIERS[i]);
+            } catch {}
+        }
+    }
+
     function _getBestDEX(
         address token,
         uint256 amount,
         bool isBuy
     ) internal view returns (address) {
-        // Try all active DEXes in priority order
         for (uint256 i = 0; i < activeDEXes.length; i++) {
             address dex = activeDEXes[i];
-            if (_isDEXSuitable(dex, token, amount, isBuy)) {
-                return dex;
-            }
+            if (_isDEXSuitable(dex, token, amount, isBuy)) return dex;
         }
-
         return address(0);
     }
 
-    /**
-     * @notice Get all active DEXes in priority order
-     * @return Array of DEX addresses sorted by priority (lowest first)
-     */
-    function getActiveDEXes() external view returns (address[] memory) {
-        return activeDEXes;
-    }
-
-    /**
-     * @notice Get DEX configuration by address
-     * @param dex The DEX address
-     * @return DEXConfig struct containing router, factory, isActive, and priority
-     */
-    function getDEXConfig(
-        address dex
-    ) external view returns (DEXConfig memory) {
-        return dexes[dex];
-    }
-
-    /**
-     * @notice Check if a DEX is suitable for a trade
-     * @param dex The DEX to check
-     * @param token The token to trade
-     * @param amount The amount to trade
-     * @param isBuy Whether this is a buy or sell order
-     */
     function _isDEXSuitable(
         address dex,
         address token,
@@ -512,233 +416,143 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
     ) internal view returns (bool) {
         DEXConfig storage dexConfig = dexes[dex];
         if (!dexConfig.isActive) return false;
-
-        if (dexConfig.version == DEXVersion.V2) {
-            return _isV2DEXSuitable(dexConfig, token, amount, isBuy);
-        } else {
-            return _isV3DEXSuitable(dexConfig, token, amount, isBuy);
-        }
+        return
+            dexConfig.version == DEXVersion.V2
+                ? _isV2DEXSuitable(dexConfig, token, amount, isBuy)
+                : _isV3DEXSuitable(dexConfig, token);
     }
 
-    /**
-     * @notice Check if a V2 DEX is suitable for a trade
-     * @param dexConfig The DEX configuration
-     * @param token The token to trade
-     * @param amount The amount to trade
-     * @param isBuy Whether this is a buy or sell order
-     */
     function _isV2DEXSuitable(
         DEXConfig storage dexConfig,
         address token,
         uint256 amount,
         bool isBuy
     ) internal view returns (bool) {
-        // Get WETH address from router
         IUniswapV2Router02 router = IUniswapV2Router02(dexConfig.router);
         address weth = router.WETH();
 
-        // Check if the pair exists
         address pair = IUniswapV2Factory(dexConfig.factory).getPair(
             token,
             weth
         );
         if (pair == address(0)) return false;
 
-        // Check liquidity
         (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pair)
             .getReserves();
         uint256 tokenReserve = token < weth ? reserve0 : reserve1;
         uint256 ethReserve = token < weth ? reserve1 : reserve0;
 
-        // Check minimum liquidity threshold (protects against flash loan attacks)
-        if (ethReserve < minLiquidityThreshold) {
-            return false;
-        }
+        if (ethReserve < minLiquidityThreshold) return false;
 
-        // Ensure sufficient liquidity with safety margin for the specific trade
-        if (isBuy) {
-            return ethReserve >= (amount * 11) / 10; // 10% safety margin
-        } else {
-            return tokenReserve >= (amount * 11) / 10; // 10% safety margin
-        }
+        // Require 10% safety margin above the trade amount
+        return
+            isBuy
+                ? ethReserve >= (amount * 11) / 10
+                : tokenReserve >= (amount * 11) / 10;
     }
 
-    /**
-     * @notice Check if a V3 DEX is suitable for a trade
-     * @param dexConfig The DEX configuration
-     * @param token The token to trade
-     */
     function _isV3DEXSuitable(
         DEXConfig storage dexConfig,
-        address token,
-        uint256 /* amount */,
-        bool /* isBuy */
+        address token
     ) internal view returns (bool) {
-        // Get WETH address
         address weth = _getWETHAddress();
         if (weth == address(0)) return false;
 
-        IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
+        (address poolAddress, ) = _findV3Pool(dexConfig, token, weth);
 
-        // Try common fee tiers: 500, 3000, 10000
-        uint24[] memory feeTiers = new uint24[](3);
-        feeTiers[0] = 500; // 0.05%
-        feeTiers[1] = 3000; // 0.3%
-        feeTiers[2] = 10000; // 1%
+        if (poolAddress == address(0)) return false;
 
-        for (uint256 i = 0; i < feeTiers.length; i++) {
-            address pool = factory.getPool(
-                token < weth ? token : weth,
-                token < weth ? weth : token,
-                feeTiers[i]
-            );
-            if (pool != address(0)) {
-                // Check if pool has liquidity and valid price
-                try IUniswapV3Pool(pool).slot0() returns (
-                    uint160 sqrtPriceX96,
-                    int24,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint8,
-                    bool
-                ) {
-                    if (sqrtPriceX96 > 0) {
-                        // Check liquidity
-                        try IUniswapV3Pool(pool).liquidity() returns (
-                            uint128 liquidity
-                        ) {
-                            if (liquidity > 0) {
-                                return true;
-                            }
-                        } catch {
-                            continue;
-                        }
-                    }
-                } catch {
-                    continue;
-                }
-            }
+        // Also validate that there is a valid price (sqrtPriceX96 > 0)
+        if (dexConfig.isPancakeType) {
+            try IPancakeV3Pool(poolAddress).slot0() returns (
+                uint160 sqrtPriceX96,
+                int24,
+                uint16,
+                uint16,
+                uint16,
+                uint32,
+                bool
+            ) {
+                return sqrtPriceX96 > 0;
+            } catch {}
+        } else {
+            try IUniswapV3Pool(poolAddress).slot0() returns (
+                uint160 sqrtPriceX96,
+                int24,
+                uint16,
+                uint16,
+                uint16,
+                uint8,
+                bool
+            ) {
+                return sqrtPriceX96 > 0;
+            } catch {}
         }
-
         return false;
     }
 
-    /**
-     * @notice Safe approval pattern that resets approval to 0 first
-     * @param token The token to approve
-     * @param spender The spender address
-     * @param amount The amount to approve
-     */
-    function _safeApprove(
-        address token,
-        address spender,
-        uint256 amount
-    ) internal {
-        IERC20(token).approve(spender, 0); // Reset approval
-        IERC20(token).approve(spender, amount); // Set new approval
-    }
-
-    /**
-     * @notice Sort DEXes by priority
-     */
     function _sortDEXesByPriority() internal {
-        // Insertion sort - more efficient than bubble sort for small arrays
         for (uint256 i = 1; i < activeDEXes.length; i++) {
-            address currentDEX = activeDEXes[i];
-            uint256 currentPriority = dexes[currentDEX].priority;
+            address current = activeDEXes[i];
+            uint256 currentPriority = dexes[current].priority;
             uint256 j = i;
 
-            // Move elements that are greater than current one position ahead
             while (
                 j > 0 && dexes[activeDEXes[j - 1]].priority > currentPriority
             ) {
-                address movedDEX = activeDEXes[j - 1];
-                activeDEXes[j] = movedDEX;
-                dexIndex[movedDEX] = j; // Update index for the moved DEX
+                address moved = activeDEXes[j - 1];
+                activeDEXes[j] = moved;
+                dexIndex[moved] = j;
                 j--;
             }
 
-            // Place current element in correct position
-            activeDEXes[j] = currentDEX;
-            dexIndex[currentDEX] = j; // Update index mapping
+            activeDEXes[j] = current;
+            dexIndex[current] = j;
         }
     }
 
-    receive() external payable {}
+    // =============================== VIEWS ===============================
 
-    // =============================== EMERGENCY FUNCTIONS ===============================
+    function getActiveDEXes() external view returns (address[] memory) {
+        return activeDEXes;
+    }
 
-    /**
-     * @notice Emergency function to withdraw ETH from the contract
-     * @param recipient Address to receive the ETH
-     * @param amount Amount of ETH to withdraw (0 = withdraw all)
-     * @dev Only callable by contract owner in emergency situations
-     */
+    function getDEXConfig(
+        address dex
+    ) external view returns (DEXConfig memory) {
+        return dexes[dex];
+    }
+
+    // =============================== EMERGENCY ===============================
+
     function emergencyWithdrawETH(
         address payable recipient,
         uint256 amount
     ) external onlyOwner {
         require(recipient != address(0), "Invalid recipient");
-        require(address(this).balance > 0, "No ETH to withdraw");
-
-        uint256 withdrawAmount = amount == 0 ? address(this).balance : amount;
-        require(
-            withdrawAmount <= address(this).balance,
-            "Insufficient ETH balance"
-        );
+        uint256 bal = address(this).balance;
+        require(bal > 0, "No ETH to withdraw");
+        uint256 withdrawAmount = amount == 0 ? bal : amount;
+        require(withdrawAmount <= bal, "Insufficient ETH balance");
 
         (bool success, ) = recipient.call{value: withdrawAmount}("");
         require(success, "ETH withdrawal failed");
-
         emit EmergencyWithdrawETH(recipient, withdrawAmount);
     }
 
-    /**
-     * @notice Emergency function to withdraw ERC20 tokens from the contract
-     * @param token Address of the token to withdraw
-     * @param recipient Address to receive the tokens
-     * @param amount Amount of tokens to withdraw (0 = withdraw all)
-     * @dev Only callable by contract owner in emergency situations
-     */
-    function emergencyWithdrawToken(
-        address token,
-        address recipient,
-        uint256 amount
-    ) external onlyOwner {
-        require(token != address(0), "Invalid token address");
-        require(recipient != address(0), "Invalid recipient");
-
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        require(balance > 0, "No tokens to withdraw");
-
-        uint256 withdrawAmount = amount == 0 ? balance : amount;
-        require(withdrawAmount <= balance, "Insufficient token balance");
-
-        IERC20(token).safeTransfer(recipient, withdrawAmount);
-
-        emit EmergencyWithdrawToken(token, recipient, withdrawAmount);
-    }
-
-    /**
-     * @notice Emergency function to withdraw multiple tokens at once
-     * @param tokens Array of token addresses to withdraw
-     * @param recipient Address to receive all tokens
-     * @dev Only callable by contract owner in emergency situations
-     * @dev More gas efficient than calling emergencyWithdrawToken multiple times
-     */
-    function emergencyWithdrawMultipleTokens(
+    function emergencyWithdrawTokens(
         address[] calldata tokens,
         address recipient
     ) external onlyOwner {
         require(recipient != address(0), "Invalid recipient");
-        require(tokens.length > 0, "No tokens specified");
-        require(tokens.length <= 20, "Too many tokens to withdraw at once");
+        require(
+            tokens.length > 0 && tokens.length <= 20,
+            "Invalid token count"
+        );
 
         for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];
             require(token != address(0), "Invalid token address");
-
             uint256 balance = IERC20(token).balanceOf(address(this));
             if (balance > 0) {
                 IERC20(token).safeTransfer(recipient, balance);
@@ -747,11 +561,5 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         }
     }
 
-    // Events for emergency withdrawals
-    event EmergencyWithdrawETH(address indexed recipient, uint256 amount);
-    event EmergencyWithdrawToken(
-        address indexed token,
-        address indexed recipient,
-        uint256 amount
-    );
+    receive() external payable {}
 }

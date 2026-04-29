@@ -1,9 +1,9 @@
 {
-  "GradientProtocolTestnet#GradientRegistry": "0x719E8f4df3EE3bD1F6D48eFAed68e531EEaaA08c",
-  "GradientProtocolTestnet#UniswapV3PriceHelper": "0x8CA25740EfE27aB63dde8436DCC4a7dd8B97ebc3",
-  "GradientProtocolTestnet#FallbackExecutor": "0xDd568AE3943010034A9329d1bcD05fA17dB9D5B2",
-  "GradientProtocolTestnet#GradientFeeManager": "0x69329a71d7f2bD95625e6C5a53F32339a8106ab0",
-  "GradientProtocolTestnet#GradientMarketMakerFactory": "0x8d2D64c2288470ac9183E3996a883EA5F2C8B2cC",
-  "GradientProtocolTestnet#GradientOrderbook": "0x95883D346438A145Ee13a576ed810f5325A106B3",
-  "GradientProtocolTestnet#EventAggregator": "0x48fB2b3fa8F384b212e63A1cdB2a3911C2F7126d"
+  "GradientProtocolBnbTestnet#GradientDexQuoteHelper": "0xa8E1EC4e6Df2c54A035e358424c7b11d91E16269",
+  "GradientProtocolBnbTestnet#GradientRegistry": "0x3C2bA9605DedB641D85415689252E9044ce958da",
+  "GradientProtocolBnbTestnet#FallbackExecutorV2": "0x85b754d14Bc0A24D56F52CE00999172F7fb573DF",
+  "GradientProtocolBnbTestnet#GradientFeeManager": "0x9b1a83823d94eC310100b026226c32E61D2d2CC5",
+  "GradientProtocolBnbTestnet#GradientMarketMakerFactory": "0x1378e0469459bb0625F4c454C7D0d1226D8aDA4b",
+  "GradientProtocolBnbTestnet#GradientOrderbook": "0xf34fF09acd45aDB5C5db8f302062b8caAc2cDE8f",
+  "GradientProtocolBnbTestnet#EventAggregator": "0xC526dD3030D390f1173e0f601F39FDDb29aee4E6"
 }

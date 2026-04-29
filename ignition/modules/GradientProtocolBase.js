@@ -48,6 +48,13 @@ module.exports = buildModule("GradientProtocolBase", (m) => {
     {}
   );
 
+  const dexQuoteHelper = m.contract("GradientDexQuoteHelper", [], {});
+  m.call(dexQuoteHelper, "addVenue", [
+    ROUTER_ADDRESSES.base.uniswapV2Router,
+    uniswapV3PriceHelper,
+  ]);
+  m.call(gradientMarketMakerFactory, "setDexQuoteHelper", [dexQuoteHelper]);
+
   // 8. Deploy GradientOrderbook (depends on registry)
   const gradientOrderbook = m.contract(
     "GradientOrderbook",
@@ -71,12 +78,7 @@ module.exports = buildModule("GradientProtocolBase", (m) => {
   // 10. Override maxOrderTtl to 7 days for Base
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-  m.call(gradientOrderbook, "setUniswapV3Factory", [
-    ROUTER_ADDRESSES.base.uniswapV3Factory
-  ]);
-  m.call(gradientOrderbook, "setUniswapV3PriceHelper", [
-    uniswapV3PriceHelper
-  ]);
+  m.call(gradientOrderbook, "setDexQuoteHelper", [dexQuoteHelper]);
 
   // 11. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [deployer, true]);
@@ -106,6 +108,7 @@ module.exports = buildModule("GradientProtocolBase", (m) => {
     fallbackExecutor,
     gradientFeeManager,
     gradientOrderbook,
-    uniswapV3PriceHelper
+    uniswapV3PriceHelper,
+    dexQuoteHelper,
   };
 });

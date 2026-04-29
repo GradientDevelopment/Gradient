@@ -43,19 +43,19 @@ describe("FallbackExecutor Uniswap V3 Compatibility", function () {
     // Or we can deploy a minimal mock using Hardhat's deployContract if we had the artifact.
     // Let's check if we can deploy a simple mock for registry.
     // FallbackExecutor calls: gradientRegistry.orderbook() and gradientRegistry.blockedTokens(token)
-    
+
     // We'll create a simple MockRegistry contract inline if possible, but we can't.
     // So we'll deploy a MockRegistry contract.
     // Wait, I didn't create MockRegistry.sol. I should have.
     // But I can deploy the real GradientRegistry if it's simple.
     // Let's look at GradientRegistry.sol.
     // It seems to be in contracts/GradientRegistry.sol.
-    
+
     const GradientRegistry = await ethers.getContractFactory("GradientRegistry");
     mockRegistry = await GradientRegistry.deploy(owner.address); // Assuming constructor takes owner
     // Actually let's check GradientRegistry constructor.
     // If it's complex, I'll create a mock.
-    
+
     // For now, let's assume we can deploy it.
     // We need to set the orderbook address in the registry.
     await mockRegistry.setOrderbook(mockOrderbook.address);
@@ -91,13 +91,13 @@ describe("FallbackExecutor Uniswap V3 Compatibility", function () {
 
     // We can't access internal _getWETHAddress directly, but we can try to execute a trade
     // which calls _getWETHAddress.
-    
+
     // Fund the executor with some ETH for buying
     const amountIn = ethers.parseEther("1");
-    
+
     // We need to call executeTrade from the orderbook
     // We are simulating the orderbook
-    
+
     await expect(
       executor.connect(mockOrderbook).executeTrade(
         await tokenA.getAddress(),
@@ -130,7 +130,7 @@ describe("FallbackExecutor Uniswap V3 Compatibility", function () {
 
     // Fund the executor with some ETH for buying
     const amountIn = ethers.parseEther("1");
-    
+
     // Execute trade
     // We expect it to succeed now because _getWETHAddress will find the V2 router
     await expect(

@@ -51,6 +51,11 @@ interface IGradientMarketMakerFactory {
     function univ3Helper() external view returns (address);
 
     /**
+     * @notice Get the DEX quote helper address (public variable, auto-generated getter)
+     */
+    function dexQuoteHelper() external view returns (address);
+
+    /**
      * @notice Check if a given address is a valid pool
      * @param poolAddress Address to check
      * @return isValid True if the address is a valid pool

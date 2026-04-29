@@ -18,7 +18,7 @@ error PoolAlreadyExists();
 error TokenBlocked();
 error EthAmountMismatch();
 error TokenAmountZero();
-error InvalidUniv3Helper();
+error InvalidAddress();
 
 /**
  * @title GradientMarketMakerFactory
@@ -29,7 +29,7 @@ contract GradientMarketMakerFactory is Ownable {
     using SafeERC20 for IERC20;
     IGradientRegistry public immutable gradientRegistry;
     IEventAggregator public eventAggregator;
-    address public univ3Helper;
+    address public dexQuoteHelper;
 
     // Mapping from token address to pool address
     mapping(address => address) public getPool;
@@ -50,9 +50,9 @@ contract GradientMarketMakerFactory is Ownable {
         address indexed oldEventAggregator,
         address indexed newEventAggregator
     );
-    event Univ3HelperUpdated(
-        address indexed oldUniv3Helper,
-        address indexed newUniv3Helper
+    event DexQuoteHelperUpdated(
+        address indexed oldDexQuoteHelper,
+        address indexed newDexQuoteHelper
     );
 
     constructor(
@@ -90,15 +90,15 @@ contract GradientMarketMakerFactory is Ownable {
     }
 
     /**
-     * @notice Set the UniswapV3PriceHelper address
-     * @param _univ3Helper New UniswapV3PriceHelper address
+     * @notice Set the GradientDexQuoteHelper address (for multi-DEX quotes)
+     * @param _dexQuoteHelper New helper address (can be zero to unset)
      */
-    function setUniv3Helper(address _univ3Helper) external onlyOwner {
-        if (_univ3Helper != address(0) && _univ3Helper.code.length == 0)
-            revert InvalidUniv3Helper();
-        address oldUniv3Helper = univ3Helper;
-        univ3Helper = _univ3Helper;
-        emit Univ3HelperUpdated(oldUniv3Helper, _univ3Helper);
+    function setDexQuoteHelper(address _dexQuoteHelper) external onlyOwner {
+        if (_dexQuoteHelper != address(0) && _dexQuoteHelper.code.length == 0)
+            revert InvalidAddress();
+        address oldHelper = dexQuoteHelper;
+        dexQuoteHelper = _dexQuoteHelper;
+        emit DexQuoteHelperUpdated(oldHelper, _dexQuoteHelper);
     }
 
     /**

@@ -48,6 +48,15 @@ module.exports = buildModule("GradientProtocol", (m) => {
     {}
   );
 
+  // 7.5. DEX quote helper (orderbook pricing: V2 + V3 per venue)
+  const dexQuoteHelper = m.contract("GradientDexQuoteHelper", [], {});
+  m.call(dexQuoteHelper, "addVenue", [
+    ROUTER_ADDRESSES.mainnet.uniswapV2Router,
+    uniswapV3PriceHelper,
+  ]);
+  // Wire factory + pools to the same quote helper
+  m.call(gradientMarketMakerFactory, "setDexQuoteHelper", [dexQuoteHelper]);
+
   // 8. Deploy GradientOrderbook (depends on registry)
   const gradientOrderbook = m.contract(
     "GradientOrderbook",
@@ -83,15 +92,8 @@ module.exports = buildModule("GradientProtocol", (m) => {
   // Override maxOrderTtl to 7 days for mainnet (shorter than default 30 days)
   m.call(gradientOrderbook, "setMaxOrderTtl", [604800]);
 
-  // 10.5. Set Uniswap V3 Factory address in orderbook
-  m.call(gradientOrderbook, "setUniswapV3Factory", [
-    ROUTER_ADDRESSES.mainnet.uniswapV3Factory
-  ]);
-
-  // 10.6. Set Uniswap V3 Price Helper in orderbook
-  m.call(gradientOrderbook, "setUniswapV3PriceHelper", [
-    uniswapV3PriceHelper
-  ]);
+  // 10.5. Wire orderbook to DEX quote helper
+  m.call(gradientOrderbook, "setDexQuoteHelper", [dexQuoteHelper]);
 
   // 11. Authorize deployer as fulfiller in registry
   m.call(gradientRegistry, "authorizeFulfiller", [
@@ -132,6 +134,7 @@ module.exports = buildModule("GradientProtocol", (m) => {
     fallbackExecutor,
     gradientFeeManager,
     gradientOrderbook,
-    uniswapV3PriceHelper
+    uniswapV3PriceHelper,
+    dexQuoteHelper,
   };
 });

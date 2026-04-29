@@ -8,10 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {IGradientRegistry} from "./interfaces/IGradientRegistry.sol";
 import {IGradientMarketMakerFactory} from "./interfaces/IGradientMarketMakerFactory.sol";
-import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
-import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
-import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
-import {IUniswapV3PriceHelper} from "./interfaces/IUniswapV3PriceHelper.sol";
+import {IGradientDexQuoteHelper} from "./interfaces/IGradientDexQuoteHelper.sol";
 import {IEventAggregator} from "./interfaces/IEventAggregator.sol";
 import {IGradientMarketMakerPoolV3} from "./interfaces/IGradientMarketMakerPoolV3.sol";
 
@@ -324,15 +321,12 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     }
 
     /**
-     * @notice Get the Uniswap V3 helper address from the factory
-     * @return univ3HelperAddress Address of the UniswapV3PriceHelper
+     * @notice Get the DEX quote helper address from the factory
+     * @return helper Address of the quote helper
      */
-    function getUniv3Helper() public view returns (IUniswapV3PriceHelper) {
-        address helperAddress = factoryContract.univ3Helper();
-        if (helperAddress == address(0)) {
-            return IUniswapV3PriceHelper(address(0));
-        }
-        return IUniswapV3PriceHelper(helperAddress);
+    function getDexQuoteHelper() public view returns (IGradientDexQuoteHelper) {
+        address helperAddress = factoryContract.dexQuoteHelper();
+        return IGradientDexQuoteHelper(helperAddress);
     }
 
     /**
@@ -863,33 +857,22 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
     }
 
     /**
-     * @notice Get the Uniswap pool/pair address for this token (checks V3 first, then V2)
-     * @return poolAddress Address of the Uniswap V3 pool or V2 pair (returns address(0) if neither exists)
-     * @dev Returns V3 pool address if available, otherwise V2 pair address
+     * @notice Get the best AMM pool/pair address for this token (liquidity-aware)
+     * @return poolAddress Address of the best V3 pool or V2 pair (returns address(0) if none exists)
      */
     function getPairAddress() public view returns (address poolAddress) {
-        address routerAddress = getRegistry().router();
-        if (routerAddress == address(0)) revert RouterNotSet();
-
-        IUniswapV2Router02 router = IUniswapV2Router02(routerAddress);
-        address weth = router.WETH();
-
-        // Try V3 first
-        IUniswapV3PriceHelper helper = getUniv3Helper();
-        if (address(helper) != address(0)) {
-            address v3Pool = helper.getV3PoolAddress(
-                address(tokenContract),
-                weth
-            );
-            if (v3Pool != address(0)) {
-                return v3Pool;
+        IGradientDexQuoteHelper helper = getDexQuoteHelper();
+        if (address(helper) == address(0)) revert RouterNotSet();
+        address tokenContractAddr = address(tokenContract);
+        if (helper.hasV3Pool(tokenContractAddr)) {
+            (, poolAddress, ) = helper.getV3PoolAddress(tokenContractAddr);
+            if (poolAddress != address(0)) {
+                return poolAddress;
             }
         }
-
-        // Fall back to V2
-        address factoryAddress = router.factory();
-        IUniswapV2Factory uniswapFactory = IUniswapV2Factory(factoryAddress);
-        return uniswapFactory.getPair(address(tokenContract), weth);
+        if (helper.hasV2Pool(tokenContractAddr)) {
+            (, poolAddress, , ) = helper.getBestV2Pool(tokenContractAddr);
+        }
     }
 
     /**
@@ -902,21 +885,19 @@ contract GradientMarketMakerPoolV3 is ReentrancyGuard {
         view
         returns (uint256 reserveETH, uint256 reserveToken)
     {
-        address pairAddress = getPairAddress();
-        // For V3-only tokens, there's no V2 pair - reserves not available via V2
-        if (pairAddress == address(0)) {
-            // V3 tokens don't have V2 reserves - return zeros or revert based on your needs
-            // For now, returning zeros for V3 tokens
+        IGradientDexQuoteHelper helper = getDexQuoteHelper();
+        if (address(helper) == address(0)) {
             return (0, 0);
         }
-
-        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pairAddress)
-            .getReserves();
-        address token0 = IUniswapV2Pair(pairAddress).token0();
-
-        (reserveETH, reserveToken) = token0 == address(tokenContract)
-            ? (reserve1, reserve0)
-            : (reserve0, reserve1);
+        try helper.getReserves(address(tokenContract)) returns (
+            uint256 rEth,
+            uint256 rTok
+        ) {
+            return (rEth, rTok);
+        } catch {
+            // If token has only V3 liquidity (or no V2 pair), reserves are unavailable via V2
+            return (0, 0);
+        }
     }
 
     /**
