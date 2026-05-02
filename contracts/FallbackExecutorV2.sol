@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
@@ -49,9 +53,10 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
 
     uint256 public maxDEXs = 5;
     uint256 public constant MAX_DEADLINE = 300; // 5 minutes
-    uint256 public minLiquidityThreshold = 10 ether; // Minimum liquidity in ETH equivalent
+    uint256 public minLiquidityThreshold = 3 ether; // Minimum liquidity in ETH equivalent
     // Fee tiers used when searching for V3 pools
     uint24[3] public FEE_TIERS = [500, 3000, 10000];
+    uint24[4] public PANCAKE_FEE_TIERS = [100, 500, 2500, 10000];
 
     // Events
     event DEXAdded(
@@ -78,6 +83,8 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
         address indexed recipient,
         uint256 amount
     );
+    event V3FeeTiersUpdated(uint24[3] feeTiers);
+    event PancakeV3FeeTiersUpdated(uint24[4] feeTiers);
 
     modifier onlyOrderbook() {
         require(
@@ -89,6 +96,28 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
 
     constructor(IGradientRegistry _gradientRegistry) Ownable(msg.sender) {
         gradientRegistry = _gradientRegistry;
+    }
+
+    /**
+     * @notice Sets the V3 fee tiers to check
+     * @param _feeTiers Array of fee tiers (e.g., [500, 3000, 10000] for 0.05%, 0.3%, 1%)
+     * @dev Only callable by owner
+     */
+    function setV3FeeTiers(uint24[3] calldata _feeTiers) external onlyOwner {
+        FEE_TIERS = _feeTiers;
+        emit V3FeeTiersUpdated(_feeTiers);
+    }
+
+    /**
+     * @notice Sets the V3 fee tiers to check
+     * @param _feeTiers Array of fee tiers (e.g., [500, 3000, 10000] for 0.05%, 0.3%, 1%)
+     * @dev Only callable by owner
+     */
+    function setPancakeV3FeeTiers(
+        uint24[4] calldata _feeTiers
+    ) external onlyOwner {
+        PANCAKE_FEE_TIERS = _feeTiers;
+        emit PancakeV3FeeTiersUpdated(_feeTiers);
     }
 
     /**
@@ -385,14 +414,38 @@ contract FallbackExecutorV2 is ReentrancyGuard, Ownable {
     ) internal view returns (address poolAddress, uint24 poolFee) {
         IUniswapV3Factory factory = IUniswapV3Factory(dexConfig.factory);
         (address t0, address t1) = token < weth ? (token, weth) : (weth, token);
+        uint128 maxLiquidity = 0;
 
-        for (uint256 i = 0; i < FEE_TIERS.length; i++) {
-            address pool = factory.getPool(t0, t1, FEE_TIERS[i]);
-            if (pool == address(0)) continue;
+        if (dexConfig.isPancakeType) {
+            for (uint256 i = 0; i < PANCAKE_FEE_TIERS.length; i++) {
+                address pool = factory.getPool(t0, t1, PANCAKE_FEE_TIERS[i]);
+                if (pool == address(0)) continue;
 
-            try IUniswapV3Pool(pool).liquidity() returns (uint128 liquidity) {
-                if (liquidity > 0) return (pool, FEE_TIERS[i]);
-            } catch {}
+                try IUniswapV3Pool(pool).liquidity() returns (
+                    uint128 liquidity
+                ) {
+                    if (liquidity > maxLiquidity) {
+                        maxLiquidity = liquidity;
+                        poolAddress = pool;
+                        poolFee = PANCAKE_FEE_TIERS[i];
+                    }
+                } catch {}
+            }
+        } else {
+            for (uint256 i = 0; i < FEE_TIERS.length; i++) {
+                address pool = factory.getPool(t0, t1, FEE_TIERS[i]);
+                if (pool == address(0)) continue;
+
+                try IUniswapV3Pool(pool).liquidity() returns (
+                    uint128 liquidity
+                ) {
+                    if (liquidity > maxLiquidity) {
+                        maxLiquidity = liquidity;
+                        poolAddress = pool;
+                        poolFee = FEE_TIERS[i];
+                    }
+                } catch {}
+            }
         }
     }
 

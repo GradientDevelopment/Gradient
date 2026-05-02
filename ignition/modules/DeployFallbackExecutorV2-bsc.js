@@ -13,25 +13,21 @@ const { ROUTER_ADDRESSES } = require("../../config/addresses");
  *   CHAIN - 'base' | 'bsc' (optional, defaults to 'base'; must match --network for correct router addresses)
  */
 module.exports = buildModule("DeployFallbackExecutorV2", (m) => {
-  const registryAddress = "0x6369bE8bBE2A6Fd1ADcb81512722d6D5bD9dc0D0";
+  const registryAddress = "0xa1C23f9B90cd1eea7a69B56aa171989cF39a8432";
   const routerAddresses = ROUTER_ADDRESSES.bsc;
 
   const fallbackExecutorV2 = m.contract(
     "FallbackExecutorV2",
     [registryAddress],
-    { id: "FallbackExecutorV2" }
+    { id: "FallbackExecutorV2" },
   );
 
   // Add V2 DEX (PancakeSwap/BaseSwap router)
   m.call(
     fallbackExecutorV2,
     "addDEX",
-    [
-      routerAddresses.uniswapV2Router,
-      routerAddresses.uniswapV2Router,
-      1,
-    ],
-    { id: "AddV2DEX" }
+    [routerAddresses.uniswapV2Router, routerAddresses.uniswapV2Router, 1],
+    { id: "AddV2DEX" },
   );
 
   // Add V3 DEX (SwapRouter02 - same interface on Base/BSC)
@@ -43,8 +39,9 @@ module.exports = buildModule("DeployFallbackExecutorV2", (m) => {
       routerAddresses.uniswapV3Router,
       routerAddresses.uniswapV3Factory,
       2,
+      false,
     ],
-    { id: "AddV3DEX" }
+    { id: "AddV3DEX" },
   );
 
   return {

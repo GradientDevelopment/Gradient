@@ -123,29 +123,29 @@ module.exports = buildModule("GradientProtocolBnb", (m) => {
     { id: "addDexV3Uniswap" },
   );
 
-  m.call(
-    fallbackExecutor,
-    "addDEX",
-    [
-      ROUTER_ADDRESSES.bsc.pancakeV2Router,
-      ROUTER_ADDRESSES.bsc.pancakeV2Router,
-      3,
-    ],
-    { id: "addDexPancakeswap" },
-  );
+  // m.call(
+  //   fallbackExecutor,
+  //   "addDEX",
+  //   [
+  //     ROUTER_ADDRESSES.bsc.pancakeV2Router,
+  //     ROUTER_ADDRESSES.bsc.pancakeV2Router,
+  //     3,
+  //   ],
+  //   { id: "addDexPancakeswap" },
+  // );
 
-  m.call(
-    fallbackExecutor,
-    "addV3DEX",
-    [
-      ROUTER_ADDRESSES.bsc.pancakeV3Router,
-      ROUTER_ADDRESSES.bsc.pancakeV3Router,
-      ROUTER_ADDRESSES.bsc.pancakeV3Factory,
-      4,
-      true,
-    ],
-    { id: "addV3DEXPancakeswap" },
-  );
+  // m.call(
+  //   fallbackExecutor,
+  //   "addV3DEX",
+  //   [
+  //     ROUTER_ADDRESSES.bsc.pancakeV3Router,
+  //     ROUTER_ADDRESSES.bsc.pancakeV3Router,
+  //     ROUTER_ADDRESSES.bsc.pancakeV3Factory,
+  //     4,
+  //     true,
+  //   ],
+  //   { id: "addV3DEXPancakeswap" },
+  // );
 
   // 13.5. Add PancakeSwap V3 as a DEX
   // m.call(fallbackExecutor, "addV3DEX", [

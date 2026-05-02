@@ -15,7 +15,7 @@ const ROUTER_ADDRESSES = {
 
     pancakeV2Router: "0x10ED43C718714eb63d5aA57B78B54704E256024E", // Pancakeswap router
     pancakeV2Factory: "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73", // Pancakeswap Factory
-    pancakeV3Router: "0x1b81D678ffb9C0263b24A97847620C99d213eB14", // Pancakeswap V3 SwapRouter
+    pancakeV3Router: "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4", // Pancakeswap V3 SwapRouter
     pancakeV3Factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865", // Pancakeswap V3 Factory,
   },
   base: {

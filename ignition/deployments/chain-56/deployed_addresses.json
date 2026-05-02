@@ -1,9 +1,3 @@
 {
-  "GradientProtocolBnb#GradientDexQuoteHelper": "0xE6AD6105F7796C4C60ae109fE4bc24F949A64D23",
-  "GradientProtocolBnb#GradientRegistry": "0xa1C23f9B90cd1eea7a69B56aa171989cF39a8432",
-  "GradientProtocolBnb#GradientOrderbook": "0xab5d24Ba830f20f6F716868d3c6cF4D37d1413D6",
-  "GradientProtocolBnb#FallbackExecutorV2": "0x73B284D39Fb9997E965be2fEf1813a90a54D70e6",
-  "GradientProtocolBnb#GradientFeeManager": "0x2D72cD7C06052111784675Ae48a0938557963Bcc",
-  "GradientProtocolBnb#GradientMarketMakerFactory": "0x3d6658BE2c18E8D93a51de4c0fAa51f264a7e6B7",
-  "GradientProtocolBnb#EventAggregator": "0x5fDae76b5838765f1c0A401860B2988cd854cD5e"
+  "DeployFallbackExecutorV2#FallbackExecutorV2": "0x4Bc322aa977B857314d99fe7e19CF5Cf7558720d"
 }
